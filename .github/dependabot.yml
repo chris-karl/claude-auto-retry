@@ -11,8 +11,9 @@ updates:
       - "dependencies"
       - "javascript"
     schedule:
-      interval: "daily"
-      time: "05:30"
+      interval: "cron"
+      # Every third Monday of a month at 5:30
+      cronjob: "30 5 * * MON#3"
       timezone: "Europe/Berlin"
     allow:
       - dependency-type: "all"

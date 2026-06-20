@@ -27,9 +27,24 @@ Examples: `feature/fix-button-spacing`, `feature/add-retry-backoff`.
   clear and easy to understand (the git/GitHub recommended style).
 - **Do NOT add any indication that the commit was co-authored by Claude.** No
   `Co-Authored-By: Claude ...` trailer, no "Generated with Claude" line, nothing.
-- Keep the body (when used) focused on what and why; wrap reasonably.
+- Below the headline you **may** add a body to further explain the committed changes —
+  but only when it genuinely adds benefit. If the headline already says enough, omit it.
+- When you do write a body, keep it focused on what changed and why; wrap reasonably.
 
 ## Merging back to `main`
+
+There are **two separate consent gates**: one to perform the squash, and one to push the
+squashed `main`. Both require explicit user consent.
+
+- **Until squash consent is given, all changes stay on the feature branch.** Do not
+  rebase-and-squash into `main` before the user has explicitly consented to the squash.
+- After the squash commit exists, **do not push it** until the user has explicitly
+  consented to the push.
+- **Never ask the user to grant both consents in a single message of yours.** Ask for one
+  at a time. The user *may* volunteer both (squash + push) together in one message of
+  their own free will — that is fine — but you must never solicit both at once.
+
+Steps once squash consent is given:
 
 1. **Rebase** the feature branch on the latest `main`.
 2. **Squash merge** the feature branch into `main`.
@@ -37,8 +52,7 @@ Examples: `feature/fix-button-spacing`, `feature/add-retry-backoff`.
    first letter, no Claude attribution).
 4. The squash message **summarizes all the commits** from the merged branch into one
    coherent message that captures everything relevant — not just the last commit.
-5. **After creating the squash commit, get explicit user consent before pushing it.**
-   Do not push the squashed `main` automatically.
+5. Then get explicit push consent (the second gate) before pushing the squashed `main`.
 
 ## Keeping this file accurate
 

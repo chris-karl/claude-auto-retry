@@ -8,6 +8,7 @@ describe('DEFAULT_CONFIG', () => {
     assert.equal(DEFAULT_CONFIG.pollIntervalSeconds, 5);
     assert.equal(DEFAULT_CONFIG.marginSeconds, 60);
     assert.equal(DEFAULT_CONFIG.fallbackWaitHours, 5);
+    assert.equal(DEFAULT_CONFIG.retryCooldownSeconds, 30);
     assert.equal(typeof DEFAULT_CONFIG.retryMessage, 'string');
     assert.deepEqual(DEFAULT_CONFIG.customPatterns, []);
   });
@@ -75,5 +76,18 @@ describe('loadConfig', () => {
       assert.equal(config.maxRetries, 5);
       assert.equal(config.marginSeconds, 60);
     } finally { await unlink(f); }
+  });
+  it('honors a valid retryCooldownSeconds and rejects an invalid one', async () => {
+    const { writeFile, unlink } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const f1 = join(tmpdir(), `car-test-${Date.now()}-a.json`);
+    const f2 = join(tmpdir(), `car-test-${Date.now()}-b.json`);
+    await writeFile(f1, JSON.stringify({ retryCooldownSeconds: 90 }));
+    await writeFile(f2, JSON.stringify({ retryCooldownSeconds: 0 }));
+    try {
+      assert.equal((await loadConfig(f1)).retryCooldownSeconds, 90);
+      assert.equal((await loadConfig(f2)).retryCooldownSeconds, 30); // < 1 → default
+    } finally { await unlink(f1); await unlink(f2); }
   });
 });

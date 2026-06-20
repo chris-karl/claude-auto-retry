@@ -1,80 +1,177 @@
-import { spawn, fork } from 'node:child_process';
-import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { isInsideTmux, getCurrentPane, getTmuxVersion, buildSetWindowOptionArgs } from './tmux.js';
+import { spawn } from 'node:child_process';
 import { isRateLimited } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { loadConfig } from './config.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const MONITOR_PATH = join(__dirname, 'monitor.js');
-
-function findClaudeBinary() {
-  try {
-    return execFileSync('which', ['claude'], { encoding: 'utf-8' }).trim();
-  } catch {
-    return 'claude';
-  }
-}
+import { createLogger } from './logger.js';
+import { runMonitor } from './monitor.js';
+import {
+  spawnPty,
+  createTerminal,
+  readScreen,
+  findClaudeBinary,
+} from './pty.js';
 
 function isPrintMode(args) {
   return args.includes('-p') || args.includes('--print');
 }
 
-function shellEscape(s) {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
+const SIGNAL_NUMBERS = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 };
+
+// Map a child's {exitCode, signal} to a single conventional exit status, used
+// uniformly by every launch path: prefer a real non-zero code; if the child was
+// killed by a signal, use 128+signal (e.g. 130 for SIGINT); otherwise a clean
+// exit stays 0, falling back to 1 only for the residual case of an unrecognized
+// signal with no exit code.
+function toExitCode(code, signal) {
+  if (typeof code === 'number' && code !== 0) return code;
+  const num = typeof signal === 'number' ? signal : SIGNAL_NUMBERS[signal];
+  if (num) return 128 + num;
+  return code ?? (signal ? 1 : 0);
 }
 
+// Resolve buffered output to the underlying fd before the process exits. A bare
+// process.stdout.write() to a pipe/file is async; exiting before it flushes
+// truncates the tail. The write callback fires once the data has been handed to
+// the OS, so awaiting it makes the flush deterministic.
+function writeFlush(stream, data) {
+  return new Promise((resolve) => {
+    if (!data) { resolve(); return; }
+    stream.write(data, resolve);
+  });
+}
+
+// Interactive mode: run Claude inside a PTY we own, mirror it to the real
+// terminal, render its output into a headless emulator for detection, and let
+// the monitor type the retry message straight into the PTY when needed.
 async function launchInteractive(args) {
   const claudeBin = findClaudeBinary();
-  const pane = getCurrentPane();
+  const config = await loadConfig();
+  const logger = createLogger();
 
-  // CLAUDE_AUTO_RETRY_PANE is inherited by claude's child processes — notably the
-  // StopFailure hook, which writes a pane-keyed event marker the monitor consumes.
-  const claude = spawn(claudeBin, args, {
-    stdio: 'inherit',
-    env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1', ...(pane ? { CLAUDE_AUTO_RETRY_PANE: pane } : {}) },
+  const cols = process.stdout.columns || 80;
+  const rows = process.stdout.rows || 30;
+
+  let term, child;
+  try {
+    term = await createTerminal(cols, rows);
+    child = await spawnPty(claudeBin, args, {
+      cols, rows,
+      cwd: process.cwd(),
+      env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1' },
+    });
+  } catch (err) {
+    process.stderr.write(`[claude-auto-retry] Failed to start PTY: ${err.message}\n`);
+    process.stderr.write('[claude-auto-retry] Falling back to a plain (unmonitored) claude session.\n');
+    return runPlain(claudeBin, args);
+  }
+
+  // PTY output -> real terminal + headless emulator (for screen detection).
+  child.onData((data) => {
+    process.stdout.write(data);
+    term.write(data);
   });
 
-  // Check spawn succeeded before using PID
-  if (claude.pid == null) {
-    claude.on('error', (err) => {
-      process.stderr.write(`[claude-auto-retry] Failed to start claude: ${err.message}\n`);
-    });
-    return new Promise((resolve) => {
-      claude.on('exit', (code) => resolve(code ?? 1));
-      claude.on('error', () => resolve(1));
-    });
-  }
+  // Real terminal input -> PTY. Raw mode so keystrokes (incl. Ctrl-C) pass
+  // through to Claude untouched.
+  const stdin = process.stdin;
+  const wasRaw = !!stdin.isRaw;
+  if (stdin.isTTY) stdin.setRawMode(true);
+  stdin.resume();
+  // Forward the raw Buffer, not a per-chunk utf8 string: a multibyte codepoint
+  // (or a paste) can be split across two 'data' events, and decoding each chunk
+  // independently would emit U+FFFD for the partial bytes. node-pty.write takes
+  // a Buffer and copies it byte-for-byte, keeping the mirror truly transparent.
+  const onStdin = (d) => { try { child.write(d); } catch {} };
+  stdin.on('data', onStdin);
 
-  // Forward SIGWINCH for terminal resize
-  process.on('SIGWINCH', () => {
-    try { claude.kill('SIGWINCH'); } catch {}
-  });
+  // Keep PTY size in sync with the real terminal.
+  const onResize = () => {
+    const c = process.stdout.columns || 80;
+    const r = process.stdout.rows || 30;
+    try { child.resize(c, r); } catch {}
+    try { term.resize(c, r); } catch {}
+  };
+  process.stdout.on('resize', onResize);
 
-  // Start monitor as detached background process
-  if (pane) {
-    const monitor = fork(MONITOR_PATH, [pane, String(claude.pid)], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    monitor.unref();
-  }
+  // Restore the real terminal and detach our listeners. Idempotent so the
+  // signal handler and the onExit handler can both call it safely.
+  let cleaned = false;
+  const restoreTerminal = () => {
+    if (cleaned) return;
+    cleaned = true;
+    stdin.off('data', onStdin);
+    if (stdin.isTTY) { try { stdin.setRawMode(wasRaw); } catch {} }
+    stdin.pause();
+    process.stdout.off('resize', onResize);
+  };
 
-  // Forward signals to Claude
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(sig, () => {
-      try { claude.kill(sig); } catch {}
-    });
-  }
+  // Terminal close / kill: tear down the child PTY. In raw-TTY mode Ctrl-C
+  // arrives as a 0x03 byte forwarded into the PTY above, so we must NOT trap
+  // SIGINT there (it would break pass-through). But when stdin is not a TTY
+  // (e.g. piped input) the terminal still raises SIGINT to our process group,
+  // so we trap it to kill the child instead of orphaning it. Trapping a signal
+  // overrides Node's default-terminate, so we must guarantee we still exit:
+  // restore the terminal immediately and arm an unref'd fallback that force-
+  // kills the child (and us) if it ignores or is slow to handle the signal.
+  let signalFallback = null;
+  const onSignal = (sig) => {
+    try { child.kill(sig); } catch {}
+    restoreTerminal();
+    if (!signalFallback) {
+      signalFallback = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch {}
+        process.exit(toExitCode(undefined, sig));
+      }, 2000);
+      signalFallback.unref();
+    }
+  };
+  const signals = stdin.isTTY ? ['SIGTERM', 'SIGHUP'] : ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  for (const sig of signals) process.on(sig, () => onSignal(sig));
+
+  let exited = false;
+  const isAlive = () => !exited;
+
+  const screen = {
+    capture: async (lines) => readScreen(term, lines),
+    send: async (text) => { child.write(text + '\r'); },
+  };
+
+  const stopMonitor = runMonitor(screen, config, logger, isAlive);
+  await logger.info(`Monitor started (claude PID: ${child.pid})`);
 
   return new Promise((resolve) => {
-    claude.on('exit', (code) => resolve(code ?? 1));
+    child.onExit(({ exitCode, signal }) => {
+      exited = true;
+      stopMonitor();
+      if (signalFallback) { clearTimeout(signalFallback); signalFallback = null; }
+      restoreTerminal();
+      logger.info('Claude exited. Monitor shutting down.').catch(() => {});
+      resolve(toExitCode(exitCode, signal));
+    });
   });
 }
 
+// Last-resort fallback if the PTY can't be created: run claude directly with
+// inherited stdio. No monitoring, but the user still gets a working session.
+function runPlain(claudeBin, args) {
+  const claude = spawn(claudeBin, args, {
+    stdio: 'inherit',
+    env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1' },
+  });
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => { try { claude.kill(sig); } catch {} });
+  }
+  return new Promise((resolve) => {
+    claude.on('exit', (code, signal) => resolve(toExitCode(code, signal)));
+    claude.on('error', (err) => {
+      process.stderr.write(`[claude-auto-retry] Failed to start claude: ${err.message}\n`);
+      resolve(1);
+    });
+  });
+}
+
+// --print mode: non-interactive. Buffer output, and if rate-limited, discard
+// the partial output, wait, and re-run with the same args. No PTY needed.
 async function launchPrintMode(args) {
   const claudeBin = findClaudeBinary();
   const config = await loadConfig();
@@ -95,9 +192,9 @@ async function launchPrintMode(args) {
       claude.on('error', (err) => {
         resolve({ code: 1, stdout: '', stderr: err.message });
       });
-      claude.on('exit', (code) => {
+      claude.on('exit', (code, signal) => {
         resolve({
-          code: code ?? 1,
+          code: toExitCode(code, signal),
           stdout: Buffer.concat(chunks).toString(),
           stderr: Buffer.concat(errChunks).toString(),
         });
@@ -107,9 +204,10 @@ async function launchPrintMode(args) {
     const combined = result.stdout + result.stderr;
 
     if (!isRateLimited(combined, config.customPatterns)) {
-      // Clean exit — write buffered output
-      process.stdout.write(result.stdout);
-      process.stderr.write(result.stderr);
+      // Clean exit — write buffered output, flushing before we return so the
+      // tail isn't truncated when stdout/stderr is a pipe or file.
+      await writeFlush(process.stdout, result.stdout);
+      await writeFlush(process.stderr, result.stderr);
       return result.code;
     }
 
@@ -117,7 +215,9 @@ async function launchPrintMode(args) {
     retries++;
     if (retries > config.maxRetries) {
       process.stderr.write(`[claude-auto-retry] Max retries (${config.maxRetries}) reached.\n`);
-      return 1;
+      // Surface claude's own exit code where it's meaningful, but never report
+      // success after giving up.
+      return result.code || 1;
     }
 
     const parsed = parseResetTime(combined);
@@ -128,78 +228,16 @@ async function launchPrintMode(args) {
   }
 }
 
-async function createTmuxSession(args) {
-  const sessionName = `claude-retry-${process.pid}-${Date.now()}`;
-  const launcherPath = __filename;
-
-  // Build the command to run inside tmux
-  const escapedLauncher = shellEscape(launcherPath);
-  const escapedArgs = args.map(a => shellEscape(a)).join(' ');
-  const innerCmd = `CLAUDE_AUTO_RETRY_ACTIVE=1 node ${escapedLauncher} ${escapedArgs}; exec bash`;
-
-  // Build env propagation args
-  // tmux -e flag requires tmux >= 3.0; for older versions, prefix env exports in the command
-  const tmuxVer = getTmuxVersion();
-  let newSessionArgs;
-
-  if (tmuxVer >= 3.0) {
-    const envArgs = [];
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k.startsWith('TMUX')) continue;
-      if (v == null) continue;
-      envArgs.push('-e', `${k}=${v}`);
-    }
-    newSessionArgs = ['new-session', '-d', '-s', sessionName, ...envArgs, innerCmd];
-  } else {
-    // For tmux < 3.0: export critical env vars inline in the command
-    const criticalVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG',
-      'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'HTTP_PROXY', 'HTTPS_PROXY',
-      'NO_PROXY', 'NODE_OPTIONS', 'NVM_DIR', 'NODE_PATH'];
-    const exports = criticalVars
-      .filter(k => process.env[k])
-      .map(k => `export ${k}=${shellEscape(process.env[k])}`)
-      .join('; ');
-    const fullCmd = exports ? `${exports}; ${innerCmd}` : innerCmd;
-    newSessionArgs = ['new-session', '-d', '-s', sessionName, fullCmd];
-  }
-
-  try {
-    execFileSync('tmux', newSessionArgs);
-
-    // Best-effort: enable mouse mode (scroll, copy-mode, pane/window click) and
-    // vi-style copy-mode keys on the session's first window. Requires tmux >= 2.1;
-    // wrapped so an older tmux that rejects these options doesn't fail the whole
-    // session creation.
-    try {
-      execFileSync('tmux', buildSetWindowOptionArgs(`${sessionName}:0`, 'mouse', 'on'));
-      execFileSync('tmux', buildSetWindowOptionArgs(`${sessionName}:0`, 'mode-keys', 'vi'));
-    } catch { /* old tmux without these options — skip silently */ }
-
-    // Attach to the session
-    const attachResult = spawn('tmux', ['attach-session', '-t', sessionName], {
-      stdio: 'inherit',
-    });
-
-    return new Promise((resolve) => {
-      attachResult.on('exit', (code) => resolve(code ?? 0));
-      attachResult.on('error', () => resolve(1));
-    });
-  } catch (err) {
-    process.stderr.write(`[claude-auto-retry] Failed to create tmux session: ${err.message}\n`);
-    return 1;
-  }
-}
-
 // Main
 const args = process.argv.slice(2);
 
-let exitCode;
+// Set exitCode rather than calling process.exit(): exit() would tear down the
+// event loop before any buffered (non-TTY) stdout/stderr writes flush. Letting
+// the loop drain naturally — after the interactive path has stopped the
+// monitor, paused stdin, and restored the terminal — exits with the right code
+// without truncating output.
 if (isPrintMode(args)) {
-  exitCode = await launchPrintMode(args);
-} else if (isInsideTmux()) {
-  exitCode = await launchInteractive(args);
+  process.exitCode = await launchPrintMode(args);
 } else {
-  exitCode = await createTmuxSession(args);
+  process.exitCode = await launchInteractive(args);
 }
-
-process.exit(exitCode);

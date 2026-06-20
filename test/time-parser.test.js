@@ -79,6 +79,35 @@ describe('parseResetTime', () => {
     assert.equal(r.hour, 19);   // 7pm, not 28
     assert.equal(r.day, 28);
   });
+  it('parses a dated weekly reset given in 24-hour time (no am/pm)', () => {
+    const r = parseResetTime("You've hit your weekly limit · resets May 28 at 19:00 (Europe/Madrid)");
+    assert.equal(r.hasDate, true);
+    assert.equal(r.month, 4);   // May
+    assert.equal(r.day, 28);
+    assert.equal(r.hour, 19);
+    assert.equal(r.minute, 0);
+    assert.equal(r.ambiguous, false);
+    assert.equal(r.timezone, 'Europe/Madrid');
+  });
+  it('parses a 24-hour "Resets by 19:00 Friday Apr 24" (day-of-week + month/day)', () => {
+    const r = parseResetTime('Resets by 19:00 Friday Apr 24');
+    assert.equal(r.hasDate, true);
+    assert.equal(r.month, 3);   // Apr
+    assert.equal(r.day, 24);
+    assert.equal(r.hour, 19);
+    assert.equal(r.minute, 0);
+  });
+  it('marks a bare 1-12 dated hour without am/pm as ambiguous', () => {
+    const r = parseResetTime('resets May 28 at 7 (UTC)');
+    assert.equal(r.hasDate, true);
+    assert.equal(r.hour, 7);
+    assert.equal(r.ambiguous, true);
+  });
+  it('does not misread a digit-bearing timezone as the dated clock', () => {
+    const r = parseResetTime('resets May 28 at 19:00 (GMT+5:30)');
+    assert.equal(r.hour, 19);   // 19:00, not 5:30 from the zone
+    assert.equal(r.minute, 0);
+  });
 });
 
 describe('calculateWaitMs', () => {
@@ -143,5 +172,13 @@ describe('calculateWaitMs', () => {
     const now = new Date('2026-05-28T19:30:00Z'); // 30 min after a 7pm UTC reset
     const wait = calculateWaitMs({ hasDate: true, month: 4, day: 28, hour: 19, minute: 0, timezone: 'UTC' }, 60, 5, now);
     assert.ok(wait < 3600_000, `expected ~0 (just elapsed), got ${wait / 86400000} days`);
+  });
+  it('picks the future reading for an ambiguous dated time whose am reading elapsed', () => {
+    const now = new Date('2026-05-28T13:00:00Z'); // 13:00 UTC on the reset day
+    // "resets May 28 at 7" with no am/pm: 07:00 already passed, 19:00 is ~6h away.
+    const wait = calculateWaitMs(
+      { hasDate: true, month: 4, day: 28, hour: 7, minute: 0, timezone: 'UTC', ambiguous: true }, 0, 5, now
+    );
+    assert.ok(wait > 5 * 3600_000 && wait < 7 * 3600_000, `expected ~6h (19:00), got ${wait / 3600000}h`);
   });
 });

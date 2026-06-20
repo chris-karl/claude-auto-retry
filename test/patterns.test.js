@@ -1,23 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption } from '../src/patterns.js';
-
-const MENU_UPGRADE_FIRST = [
-  "You've hit your session limit · resets 6:50pm (Europe/London)",
-  '/rate-limit-options',
-  'What do you want to do?',
-  '❯ 1. Upgrade your plan',
-  '  2. Stop and wait for limit to reset',
-  'Enter to confirm · Esc to cancel',
-].join('\n');
-
-const MENU_WAIT_FIRST = [
-  "You've hit your session limit · resets 12:10am (Europe/Dublin)",
-  'What do you want to do?',
-  '❯ 1. Stop and wait for limit to reset',
-  '  2. Upgrade your plan',
-  'Enter to confirm · Esc to cancel',
-].join('\n');
+import { stripAnsi, isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isClaudeBusy } from '../src/patterns.js';
 
 describe('stripAnsi', () => {
   it('removes bold codes', () => {
@@ -77,14 +60,76 @@ describe('isRateLimited', () => {
   it('detects "usage limit · resets in: 3 hours"', () => {
     assert.equal(isRateLimited('usage limit · resets in: 3 hours'), true);
   });
-  it('detects "You\'ve hit your session limit" (current Claude Code wording, #15)', () => {
+  it('detects new "session limit" wording (Claude Code update)', () => {
     assert.equal(isRateLimited("You've hit your session limit · resets 4:50pm (Asia/Shanghai)"), true);
   });
-  it('detects "You\'ve hit your weekly limit" (#15)', () => {
-    assert.equal(isRateLimited("You've hit your weekly limit · resets 9am (Europe/London)"), true);
+  it('detects new "weekly limit" wording with a clock time', () => {
+    assert.equal(isRateLimited("You've hit your weekly limit · resets 9am (UTC)"), true);
   });
-  it('still detects "You\'ve hit your 5-hour limit" (no qualifier regression)', () => {
-    assert.equal(isRateLimited("You've hit your 5-hour limit · resets 3pm (UTC)"), true);
+  it('detects "Weekly limit reached"', () => {
+    assert.equal(isRateLimited('Weekly limit reached · resets 9am'), true);
+  });
+  it('detects dated weekly limit "resets May 28 at 7pm (Europe/Madrid)"', () => {
+    assert.equal(isRateLimited("You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)"), true);
+  });
+  it('detects dated weekly limit "Resets by 4:00 AM Friday Apr 24"', () => {
+    assert.equal(isRateLimited("You've hit your weekly limit\nResets by 4:00 AM Friday Apr 24"), true);
+  });
+  it('does not treat a benign "session limit" mention as a rate limit', () => {
+    assert.equal(isRateLimited('We were discussing the session limit feature in the meeting.'), false);
+  });
+});
+
+describe('isLimitMenuPrompt', () => {
+  const menu = [
+    '❯ /rate-limit-options',
+    "You've hit your session limit · resets 6:50pm (Europe/London)",
+    'What do you want to do?',
+    '❯ 1. Stop and wait for limit to reset',
+    '  2. Upgrade your plan',
+    '  3. Upgrade to Team plan',
+    'Enter to confirm · Esc to cancel',
+  ].join('\n');
+  const upgradeFirstMenu = [
+    "You've hit your session limit · resets 6:50pm (Europe/London)",
+    'What do you want to do?',
+    '❯ 1. Upgrade your plan',
+    '  2. Stop and wait for limit to reset',
+    'Enter to confirm · Esc to cancel',
+  ].join('\n');
+  const spendMenu = [
+    'What do you want to do?',
+    '❯ Adjust monthly spend limit: Unlimited',
+    '  Wait for limit to reset',
+    '  Upgrade to Max for higher session limits every month',
+  ].join('\n');
+
+  it('detects the rate-limit-options menu', () => {
+    assert.equal(isLimitMenuPrompt(menu), true);
+  });
+  it('detects the menu regardless of which option is highlighted first', () => {
+    assert.equal(isLimitMenuPrompt(upgradeFirstMenu), true);
+  });
+  it('detects the spend-limit menu', () => {
+    assert.equal(isLimitMenuPrompt(spendMenu), true);
+  });
+  it('ignores a generic "What do you want to do?" menu', () => {
+    assert.equal(isLimitMenuPrompt('What do you want to do?\n❯ Open file\n  Close file'), false);
+  });
+  it('returns false for normal output', () => {
+    assert.equal(isLimitMenuPrompt('I can help you with that code'), false);
+  });
+});
+
+describe('isClaudeBusy', () => {
+  it('detects the "esc to interrupt" processing footer', () => {
+    assert.equal(isClaudeBusy('✻ Cogitating… (12s · ↓ 3.4k tokens · esc to interrupt)'), true);
+  });
+  it('returns false for normal output', () => {
+    assert.equal(isClaudeBusy('Here is the code you asked for'), false);
+  });
+  it('does not confuse the menu\'s "Esc to cancel" with busy', () => {
+    assert.equal(isClaudeBusy('What do you want to do?\nEnter to confirm · Esc to cancel'), false);
   });
 });
 
@@ -113,47 +158,13 @@ describe('findRateLimitMessage', () => {
     const text = '5-hour limit reached\nResets at 3pm (UTC)';
     assert.ok(findRateLimitMessage(text).includes('3pm'));
   });
-  it('returns the most recent resets line when scrollback has a stale one', () => {
-    const text = 'You\'ve hit your limit · resets 11:30am (UTC)\nlots of output\nYou\'ve hit your limit · resets 4:30pm (UTC)';
+  it('returns the freshest reset line when a stale one lingers above', () => {
+    const text = 'hit your limit · resets 11:30am (UTC)\nworked a while\nhit your limit · resets 4:30pm (UTC)';
     assert.ok(findRateLimitMessage(text).includes('4:30pm'));
   });
-});
-
-describe('isRateLimitOptionsPrompt (#19)', () => {
-  it('detects the menu with "Upgrade" highlighted first', () => {
-    assert.equal(isRateLimitOptionsPrompt(MENU_UPGRADE_FIRST), true);
-  });
-  it('detects the menu with "Stop and wait" highlighted first', () => {
-    assert.equal(isRateLimitOptionsPrompt(MENU_WAIT_FIRST), true);
-  });
-  it('detects through ANSI codes', () => {
-    assert.equal(isRateLimitOptionsPrompt('\x1b[1mWhat do you want to do?\x1b[0m\n❯ 1. Stop and wait for limit to reset'), true);
-  });
-  it('returns false for a plain rate-limit banner (no menu)', () => {
-    assert.equal(isRateLimitOptionsPrompt("You've hit your limit · resets 3pm (UTC)"), false);
-  });
-  it('returns false for normal output', () => {
-    assert.equal(isRateLimitOptionsPrompt('What do you want to do? Build a feature?'), false);
-  });
-});
-
-describe('menuStepsToWaitOption (#19)', () => {
-  it('returns +1 when "Stop and wait" is one below the cursor (Upgrade first)', () => {
-    assert.equal(menuStepsToWaitOption(MENU_UPGRADE_FIRST), 1);
-  });
-  it('returns 0 when "Stop and wait" is already highlighted', () => {
-    assert.equal(menuStepsToWaitOption(MENU_WAIT_FIRST), 0);
-  });
-  it('returns -1 when "Stop and wait" is above the cursor', () => {
-    const text = ['What do you want to do?', '  1. Stop and wait for limit to reset', '❯ 2. Upgrade your plan'].join('\n');
-    assert.equal(menuStepsToWaitOption(text), -1);
-  });
-  it('returns null when there is no cursor to anchor on', () => {
-    const text = ['What do you want to do?', '  1. Upgrade your plan', '  2. Stop and wait for limit to reset'].join('\n');
-    assert.equal(menuStepsToWaitOption(text), null);
-  });
-  it('returns null when no menu options are present', () => {
-    assert.equal(menuStepsToWaitOption('just some text'), null);
+  it('returns the dated weekly reset line', () => {
+    const text = "You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)";
+    assert.ok(findRateLimitMessage(text).includes('May 28'));
   });
 });
 

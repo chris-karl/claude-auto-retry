@@ -1,4 +1,4 @@
-import { isRateLimited, findRateLimitMessage } from './patterns.js';
+import { isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isClaudeBusy } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 
 // How many lines of the rendered screen to scan for the rate-limit banner.
@@ -13,6 +13,12 @@ const DETECTION_LINES = 20;
 // quietly instead of re-detecting the same banner on every tick.
 const MAX_RETRIES_BACKOFF_INTERVALS = 12;
 
+// Pause after dismissing the interactive limit menu so Claude's TUI has time to
+// repaint the input composer before we type the retry message into it.
+const MENU_DISMISS_SETTLE_MS = 250;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 export function createMonitorState() {
   return { status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null, retrySent: false };
 }
@@ -22,6 +28,7 @@ export function createMonitorState() {
 // `screen` is an adapter over the PTY-hosted terminal:
 //   - capture(lines): Promise<string>  -> rendered screen text (last N rows)
 //   - send(text):     Promise<void>    -> type text + Enter into the PTY
+//   - sendEscape():   Promise<void>    -> press Escape (dismiss the limit menu)
 //
 // Because Claude now runs inside a PTY we own, there is no longer any need to
 // guess whether Claude is the "foreground" process the way the tmux version
@@ -32,13 +39,31 @@ export async function processOneTick(state, screen, config, isAlive) {
   // patterns.js strips ANSI internally, so pass the raw rendered screen through.
   const screenText = await screen.capture(DETECTION_LINES);
 
+  // Newer Claude Code replaces the plain banner with an interactive
+  // `/rate-limit-options` menu; that counts as a rate-limit indicator too.
+  const menuUp = isLimitMenuPrompt(screenText);
+  // "esc to interrupt" is Claude's stable "I'm working" footer. If it's showing
+  // (and the menu isn't), a rate-limit banner still on screen is stale and must
+  // not be treated as a fresh limit — that would interrupt the running task.
+  const busy = isClaudeBusy(screenText);
+  const limited = menuUp || isRateLimited(screenText, config.customPatterns);
+
   if (state.status === 'waiting') {
     if (Date.now() < state.waitUntil) return 'waiting';
     if (!isAlive()) return 'exit';
 
+    // Claude is actively working again (and not blocked on the menu) — it
+    // resumed on its own. Stop waiting/re-sending against a banner that is
+    // merely lingering on screen.
+    if (busy && !menuUp) {
+      const outcome = state.retrySent ? 'retry-succeeded' : 'user-continued';
+      state.status = 'monitoring'; state.attempts = 0; state.retrySent = false;
+      return outcome;
+    }
+
     // Always check if rate limit cleared FIRST — even when maxRetries
     // exhausted, the user (or time passing) may have resolved it.
-    if (!isRateLimited(screenText, config.customPatterns)) {
+    if (!limited) {
       // Distinguish our own retry succeeding from the user resolving it
       // manually, so the log reflects what actually happened.
       const outcome = state.retrySent ? 'retry-succeeded' : 'user-continued';
@@ -51,6 +76,14 @@ export async function processOneTick(state, screen, config, isAlive) {
       // on the next tick and creating an infinite max-retries loop.
       state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * MAX_RETRIES_BACKOFF_INTERVALS);
       return 'max-retries';
+    }
+
+    // If the interactive limit menu is blocking input, dismiss it with Escape
+    // first — NOT Enter: the highlighted option varies and Enter could confirm
+    // "Upgrade your plan". Then submit the retry into the cleared composer.
+    if (menuUp) {
+      await screen.sendEscape();
+      await sleep(MENU_DISMISS_SETTLE_MS);
     }
 
     // Increment attempts and set cooldown BEFORE send() so that a failure
@@ -68,7 +101,10 @@ export async function processOneTick(state, screen, config, isAlive) {
     return 'retried';
   }
 
-  if (isRateLimited(screenText, config.customPatterns)) {
+  // Enter waiting on a fresh limit — but ignore a banner that is merely
+  // lingering on screen while Claude is actively working (unless the menu is
+  // blocking input, which always needs handling).
+  if (limited && (menuUp || !busy)) {
     const message = findRateLimitMessage(screenText, config.customPatterns);
     state.lastRateLimitMessage = message;
     const parsed = message ? parseResetTime(message) : null;

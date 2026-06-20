@@ -2,7 +2,7 @@
 
 > Automatically retry Claude Code sessions when you hit Anthropic subscription rate limits.
 
-When Claude Code shows *"5-hour limit reached - resets 3pm"*, this tool waits for the reset and sends "continue" automatically. You come back to find your work done.
+When Claude Code shows *"You've hit your session limit · resets 3pm"* (or the weekly limit, or the interactive `/rate-limit-options` menu), this tool waits for the reset and sends "continue" automatically. You come back to find your work done.
 
 **No workflow change. Just install and forget.**
 
@@ -111,6 +111,8 @@ The tool detects these real-world Claude Code messages:
 | Pattern | Example |
 |---------|---------|
 | N-hour limit reached | `5-hour limit reached - resets 3pm (UTC)` |
+| Session limit | `You've hit your session limit · resets 6:50pm (Europe/London)` |
+| Weekly limit | `You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)` |
 | Usage limit | `Claude usage limit reached. Resets at 2pm` |
 | Out of extra usage | `You're out of extra usage · resets 3pm` |
 | Try again | `Please try again in 5 hours` |
@@ -118,6 +120,30 @@ The tool detects these real-world Claude Code messages:
 | Rate limit | `Rate limit hit. Resets at 4pm` |
 
 Custom patterns can be added via config for future message format changes.
+
+### Interactive rate-limit menu
+
+Newer Claude Code versions don't just print a banner — they pop an interactive
+menu (`/rate-limit-options`):
+
+```
+What do you want to do?
+❯ 1. Stop and wait for limit to reset
+  2. Upgrade your plan
+  3. Upgrade to Team plan
+  Enter to confirm · Esc to cancel
+```
+
+The highlighted option **varies** (sometimes "Upgrade your plan" is the default),
+so the tool never presses Enter blindly. Instead, once the limit resets it
+presses **Escape** to dismiss the menu, then submits the retry message — so it
+can never accidentally confirm an upgrade.
+
+### Weekly limits
+
+Weekly (7-day) limits report a calendar date, e.g. `resets May 28 at 7pm
+(Europe/Madrid)`. The tool parses the full date and waits until it actually
+resets, however many days away that is.
 
 ## Configuration
 

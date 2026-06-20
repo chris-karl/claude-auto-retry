@@ -62,6 +62,11 @@ Steps once squash consent is given:
 
 ## Repository context
 
-- Working remote is **`custom-origin`** (`git@github.com:joldjunge/claude-auto-retry.git`);
-  `origin` is the upstream `cheapestinference/claude-auto-retry`. `main` tracks
+This repo is a fork, and its two remotes have distinct roles:
+
+- **`custom-origin`** (`git@github.com:joldjunge/claude-auto-retry.git`) — our own fork and
+  the **main working remote**. All branches, commits, and pushes go here, and `main` tracks
   `custom-origin/main`.
+- **`origin`** (`git@github.com:cheapestinference/claude-auto-retry.git`) — the upstream this
+  fork was created from. Kept around only to pull in potentially useful updates from
+  upstream. Treat it as **read-only: never push to `origin`.**

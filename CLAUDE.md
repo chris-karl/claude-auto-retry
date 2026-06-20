@@ -33,16 +33,19 @@ Examples: `feature/fix-button-spacing`, `feature/add-retry-backoff`.
 
 ## Merging back to `main`
 
-There are **two separate consent gates**: one to perform the squash, and one to push the
-squashed `main`. Both require explicit user consent.
+This flow has **three separate user prompts**, each needing its own explicit answer:
+(1) consent to squash, (2) consent to push the squash, and (3) after the push, whether to
+delete the merged feature branch.
 
 - **Until squash consent is given, all changes stay on the feature branch.** Do not
   rebase-and-squash into `main` before the user has explicitly consented to the squash.
 - After the squash commit exists, **do not push it** until the user has explicitly
   consented to the push.
-- **Never ask the user to grant both consents in a single message of yours.** Ask for one
-  at a time. The user *may* volunteer both (squash + push) together in one message of
-  their own free will — that is fine — but you must never solicit both at once.
+- After the squashed `main` is pushed, **ask whether the feature branch should be deleted
+  both locally and on the remote.**
+- **Never mix these prompts into a single message of yours.** Ask for one at a time. The
+  user *may* volunteer several (or all) of the answers at once of their own free will —
+  that is fine — but you must never solicit more than one at once.
 
 Steps once squash consent is given:
 
@@ -53,6 +56,11 @@ Steps once squash consent is given:
 4. The squash message **summarizes all the commits** from the merged branch into one
    coherent message that captures everything relevant — not just the last commit.
 5. Then get explicit push consent (the second gate) before pushing the squashed `main`.
+6. After the push, ask whether to delete the feature branch locally and on the remote.
+   If the user agrees, delete it with:
+   - `git branch -D <branch>` — use **`-D`** (force), **not** `-d`: git does not treat a
+     squash merge as a real merge, so `-d` would refuse to delete the branch.
+   - `git push custom-origin --delete <branch>` — to remove it from the remote.
 
 ## Keeping this file accurate
 

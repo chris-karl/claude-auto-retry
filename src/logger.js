@@ -2,7 +2,7 @@ import { appendFile, mkdir, readdir, unlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-const DEFAULT_LOG_DIR = join(homedir(), '.claude-auto-retry', 'logs');
+export const DEFAULT_LOG_DIR = join(homedir(), '.claude-auto-retry', 'logs');
 const MAX_AGE_DAYS = 7;
 const CLEANUP_INTERVAL_MS = 3600_000;
 let lastCleanup = 0;
@@ -11,7 +11,9 @@ function timestamp() {
   return new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
 }
 
-function todayFile(dir) {
+// Path to today's log file. Exported so the CLI readers (status/logs) share the
+// exact directory + filename layout the writer uses, with no risk of drift.
+export function todayFile(dir = DEFAULT_LOG_DIR) {
   return join(dir, `${new Date().toISOString().split('T')[0]}.log`);
 }
 

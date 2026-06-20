@@ -6,14 +6,25 @@ import { DEFAULT_CONFIG } from '../src/config.js';
 function mockScreen(screenContent = '', { failSend = false } = {}) {
   const s = {
     _sent: [],
+    _escaped: 0,
     capture: async () => screenContent,
     send: async (text) => {
       if (failSend) throw new Error('PTY destroyed');
       s._sent.push(text);
     },
+    sendEscape: async () => { s._escaped++; },
   };
   return s;
 }
+
+const MENU = [
+  '❯ /rate-limit-options',
+  "You've hit your session limit · resets 3pm (UTC)",
+  'What do you want to do?',
+  '❯ 1. Stop and wait for limit to reset',
+  '  2. Upgrade your plan',
+  'Enter to confirm · Esc to cancel',
+].join('\n');
 
 describe('processOneTick', () => {
   it('returns monitoring when no rate limit', async () => {
@@ -94,5 +105,41 @@ describe('processOneTick', () => {
     // Rate limit cleared → should detect user-continued before max-retries check
     assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
     assert.equal(st.attempts, 0);
+  });
+
+  it('ignores a stale banner that lingers while Claude is working', async () => {
+    // Banner still on the rendered screen, but Claude is actively streaming.
+    const s = mockScreen('hit your limit · resets 3pm (UTC)\n✻ Working… (8s · esc to interrupt)');
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'monitoring');
+    assert.equal(st.status, 'monitoring');
+  });
+  it('treats Claude becoming busy mid-wait as a resume', async () => {
+    const s = mockScreen('hit your limit · resets 3pm (UTC)\n✻ Working… (2s · esc to interrupt)');
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting';
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(s._sent.length, 0);
+  });
+  it('enters waiting when the interactive limit menu appears', async () => {
+    const s = mockScreen(MENU);
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'waiting');
+    assert.ok(st.waitUntil > Date.now());
+  });
+  it('dismisses the limit menu with Escape (not Enter) before submitting the retry', async () => {
+    const s = mockScreen(MENU);
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting';
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(s._escaped, 1, 'should press Escape to dismiss the menu');
+    assert.equal(s._sent.length, 1, 'should submit the retry message');
+  });
+  it('does not press Escape when there is no menu (plain banner)', async () => {
+    const s = mockScreen('5-hour limit reached - resets 3pm (UTC)');
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting';
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(s._escaped, 0);
   });
 });

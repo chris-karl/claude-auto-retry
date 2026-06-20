@@ -56,6 +56,29 @@ describe('parseResetTime', () => {
     assert.ok(r.relative);
     assert.equal(r.waitMs, 2 * 3_600_000);
   });
+  it('parses dated weekly reset "resets May 28 at 7pm (Europe/Madrid)"', () => {
+    const r = parseResetTime("You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)");
+    assert.equal(r.hasDate, true);
+    assert.equal(r.month, 4);   // May (0-indexed)
+    assert.equal(r.day, 28);
+    assert.equal(r.hour, 19);
+    assert.equal(r.minute, 0);
+    assert.equal(r.timezone, 'Europe/Madrid');
+  });
+  it('parses dated weekly reset "Resets by 4:00 AM Friday Apr 24" (day-of-week ignored, no tz)', () => {
+    const r = parseResetTime('Resets by 4:00 AM Friday Apr 24');
+    assert.equal(r.hasDate, true);
+    assert.equal(r.month, 3);   // Apr
+    assert.equal(r.day, 24);
+    assert.equal(r.hour, 4);
+    assert.equal(r.minute, 0);
+    assert.equal(r.timezone, null);
+  });
+  it('does not read the date day number as the clock hour', () => {
+    const r = parseResetTime('resets May 28 at 7pm (UTC)');
+    assert.equal(r.hour, 19);   // 7pm, not 28
+    assert.equal(r.day, 28);
+  });
 });
 
 describe('calculateWaitMs', () => {
@@ -93,35 +116,32 @@ describe('calculateWaitMs', () => {
     assert.ok(Math.abs(wait - (5 * 3600 + 60) * 1000) < 2000); // fallback
   });
 
-  // Regression (#6): in a positive-offset tz, 10:02 AM Melbourne (UTC+10)
-  // looking for "11:40pm Melbourne" should wait ~13.6h (today), not ~37.6h.
-  it('targets today for a future reset in a positive-offset timezone', () => {
-    const now = new Date('2026-05-03T00:02:15Z'); // 10:02 AM in Melbourne (UTC+10)
-    const wait = calculateWaitMs(
-      { hour: 23, minute: 40, timezone: 'Australia/Melbourne' }, 60, 5, now
-    );
-    const hours = wait / 3600_000;
-    assert.ok(hours > 13 && hours < 14, `expected ~13.6h, got ${hours.toFixed(2)}h`);
+  // Issue #6: UTC+ zones used to compute the reset as "tomorrow" (~25h over-wait).
+  it('does not over-wait ~24h for a same-day UTC+ reset (Asia/Tokyo)', () => {
+    const now = new Date('2026-04-15T09:43:47Z'); // 18:43 JST
+    const wait = calculateWaitMs({ hour: 20, minute: 0, timezone: 'Asia/Tokyo' }, 60, 5, now);
+    assert.ok(wait > 3600_000 && wait < 2 * 3600_000, `expected ~1.3h, got ${wait / 3600000}h`);
+  });
+  it('does not over-wait a day for a positive-offset reset (Australia/Melbourne)', () => {
+    const now = new Date('2026-06-15T00:02:00Z'); // 10:02 AEST (UTC+10, no DST in June)
+    const wait = calculateWaitMs({ hour: 23, minute: 40, timezone: 'Australia/Melbourne' }, 0, 5, now);
+    assert.ok(wait > 12 * 3600_000 && wait < 15 * 3600_000, `expected ~13.6h, got ${wait / 3600000}h`);
   });
 
-  // Regression (#6): negative-offset tz, "resets 3am NY" at 1am NY → ~2h.
-  it('targets today for a future reset in a negative-offset timezone', () => {
-    const now = new Date('2026-05-03T05:00:00Z'); // 1:00 AM in New York (UTC-4 EDT)
-    const wait = calculateWaitMs(
-      { hour: 3, minute: 0, timezone: 'America/New_York' }, 60, 5, now
-    );
-    const hours = wait / 3600_000;
-    assert.ok(hours > 1.9 && hours < 2.1, `expected ~2h, got ${hours.toFixed(2)}h`);
+  // Weekly limits (user choice: wait fully).
+  it('waits days for a dated weekly reset', () => {
+    const now = new Date('2026-05-21T12:00:00Z');
+    const wait = calculateWaitMs({ hasDate: true, month: 4, day: 28, hour: 19, minute: 0, timezone: 'Europe/Madrid' }, 0, 5, now);
+    assert.ok(wait > 6 * 86400_000 && wait < 8 * 86400_000, `expected ~7 days, got ${wait / 86400000} days`);
   });
-
-  // Regression (#6): reset already passed today → target tomorrow (~22.6h),
-  // not 48h. Symmetric case for the off-by-a-day bug.
-  it('targets tomorrow when reset time already passed today', () => {
-    const now = new Date('2026-05-03T15:00:00Z'); // 1:00 AM next day in Melbourne
-    const wait = calculateWaitMs(
-      { hour: 23, minute: 40, timezone: 'Australia/Melbourne' }, 60, 5, now
-    );
-    const hours = wait / 3600_000;
-    assert.ok(hours > 22 && hours < 23, `expected ~22.6h, got ${hours.toFixed(2)}h`);
+  it('rolls a dated reset to next year only across a real year boundary (Dec→Jan)', () => {
+    const now = new Date('2026-12-30T00:00:00Z');
+    const wait = calculateWaitMs({ hasDate: true, month: 0, day: 2, hour: 9, minute: 0, timezone: 'UTC' }, 0, 5, now);
+    assert.ok(wait > 2 * 86400_000 && wait < 4 * 86400_000, `expected ~3 days, got ${wait / 86400000} days`);
+  });
+  it('does not wait ~a year for a dated reset that only just elapsed', () => {
+    const now = new Date('2026-05-28T19:30:00Z'); // 30 min after a 7pm UTC reset
+    const wait = calculateWaitMs({ hasDate: true, month: 4, day: 28, hour: 19, minute: 0, timezone: 'UTC' }, 60, 5, now);
+    assert.ok(wait < 3600_000, `expected ~0 (just elapsed), got ${wait / 86400000} days`);
   });
 });

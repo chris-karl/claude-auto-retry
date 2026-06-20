@@ -11,6 +11,15 @@ import {
   findClaudeBinary,
 } from './pty.js';
 
+// Gap between typing the retry text and the submitting Enter. Claude Code's Ink
+// TUI treats text + Enter arriving in one burst as a PASTE (the Enter becomes a
+// literal newline in the composer instead of "submit"), so the retry would get
+// typed but never sent. Splitting them with a short delay makes the Enter
+// register as a real keypress.
+const SUBMIT_DELAY_MS = 300;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function isPrintMode(args) {
   return args.includes('-p') || args.includes('--print');
 }
@@ -133,7 +142,17 @@ async function launchInteractive(args) {
 
   const screen = {
     capture: async (lines) => readScreen(term, lines),
-    send: async (text) => { child.write(text + '\r'); },
+    send: async (text) => {
+      // Type the text and the submitting Enter as two separate writes (see
+      // SUBMIT_DELAY_MS) so Claude's TUI doesn't mistake them for a paste.
+      child.write(text);
+      await sleep(SUBMIT_DELAY_MS);
+      child.write('\r');
+    },
+    // Press Escape — dismisses Claude's interactive rate-limit menu before we
+    // submit the retry (the menu's highlighted option varies, so a bare Enter
+    // could confirm "Upgrade your plan").
+    sendEscape: async () => { child.write('\x1b'); },
   };
 
   const stopMonitor = runMonitor(screen, config, logger, isAlive);

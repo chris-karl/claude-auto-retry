@@ -23,20 +23,68 @@ export function stripAnsi(text) {
 // Detection: find a "limit" line and a "resets" line within 6 lines of each other.
 
 const LIMIT_PATTERNS = [
-  /(?:hit|exceeded|reached).*(?:your|the)\s*(?:[\w-]+\s+){0,3}limit/i,  // "hit/exceeded/reached your [session|weekly|5-hour] limit"
+  // Allow any words (session / weekly / 5-hour / none) between "your|the" and
+  // "limit" so newer wordings like "You've hit your session limit" and
+  // "You've hit your weekly limit" match, not just the old "N-hour limit".
+  /(?:hit|exceeded|reached).*(?:your|the)\s*(?:[\w-]+\s+)*limit/i,  // "hit/exceeded/reached your <…> limit"
   /\d+-hour limit/i,                                // "5-hour limit"
-  /limit reached/i,                                  // "limit reached"
+  /limit reached/i,                                  // "limit reached" / "Weekly limit reached"
+  /session limit/i,                                  // "You've hit your session limit"
+  /weekly limit/i,                                   // "You've hit your weekly limit"
   /usage limit/i,                                    // "usage limit"
   /out of.*usage/i,                                  // "out of extra usage"
   /rate limit/i,                                     // "rate limit"
   /try again in/i,                                   // "try again in X hours" (implies rate limiting)
 ];
 
+const MONTH = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)';
+
 const RESET_PATTERNS = [
   /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/i,   // "resets 3pm" / "resets at 3:00 PM"
   /resets?\s+in[:\s]\s*\d/i,                                   // "resets in: 3 hours"
   /try again in \d+\s*(?:hours?|minutes?|h|m)/i,               // "try again in 5 hours"
+  // Weekly-limit resets carry a calendar date, e.g.
+  //   "resets May 28 at 7pm (Europe/Madrid)"
+  //   "Resets by 4:00 AM Friday Apr 24"
+  new RegExp(String.raw`resets?\b[^\n]*\b${MONTH}[a-z]*\.?\s+\d{1,2}\b`, 'i'),  // "resets … May 28"
+  new RegExp(String.raw`resets?\b[^\n]*\b\d{1,2}\s+${MONTH}`, 'i'),             // "resets … 28 May"
 ];
+
+// Newer Claude Code surfaces an interactive menu when a limit is hit, e.g.:
+//   ❯ /rate-limit-options
+//   You've hit your session limit · resets 6:50pm (Europe/London)
+//   What do you want to do?
+//   ❯ 1. Stop and wait for limit to reset
+//     2. Upgrade your plan
+//     3. Upgrade to Team plan
+//   Enter to confirm · Esc to cancel
+// The option ORDER VARIES between plans/versions (sometimes "Upgrade your plan"
+// is the highlighted default), so pressing Enter is unsafe — it can confirm
+// "Upgrade your plan". We detect the menu so the monitor can dismiss it with
+// Escape and then submit the retry message once the limit resets. Markers are
+// limit-specific so a generic "What do you want to do?" menu won't trip it.
+const MENU_LIMIT_MARKERS = [
+  /\/rate-limit-options/i,
+  /Stop and wait for limit to reset/i,
+  /Wait for limit to reset/i,
+  /Adjust monthly spend limit/i,
+];
+
+export function isLimitMenuPrompt(text) {
+  const stripped = stripAnsi(text);
+  if (!/What do you want to do\?/i.test(stripped)) return false;
+  return MENU_LIMIT_MARKERS.some((p) => p.test(stripped));
+}
+
+// "esc to interrupt" is Claude Code's stable "I'm processing" footer — shown
+// while thinking/streaming regardless of the whimsical spinner word. If it's
+// visible, Claude is actively working, so a rate-limit banner still lingering
+// in the captured scrollback is stale and must not be treated as a fresh limit
+// (which would interrupt the running task). Note: the limit menu shows "Esc to
+// cancel", not "esc to interrupt", so this never collides with menu detection.
+export function isClaudeBusy(text) {
+  return /esc to interrupt/i.test(stripAnsi(text));
+}
 
 const WINDOW = 6;
 
@@ -49,14 +97,8 @@ function hasNearbyMatch(lines, idx, patterns) {
   return false;
 }
 
-// tailLines > 0 restricts detection to the last N lines of the pane. A live usage-limit
-// banner sits at the prompt (the last thing printed); the same words quoted in scrollback
-// — a conversation discussing limits, a stale banner the session already moved past — are
-// NOT the current state and must not drive a retry. 0 = scan everything (print mode, where
-// the input is captured process output, not a scrolling TUI).
-export function isRateLimited(text, customPatterns = [], tailLines = 0) {
-  let lines = stripAnsi(text).split('\n');
-  if (tailLines > 0) lines = lines.slice(-tailLines);
+export function isRateLimited(text, customPatterns = []) {
+  const lines = stripAnsi(text).split('\n');
 
   // Custom patterns: check full text (user controls their own regex)
   if (customPatterns.length > 0) {
@@ -76,171 +118,17 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   return false;
 }
 
-// --- Interactive /rate-limit-options menu ---
-// Newer Claude Code shows a selectable menu when a session/weekly limit is hit:
-//   What do you want to do?
-//   ❯ 1. Upgrade your plan
-//     2. Stop and wait for limit to reset
-// A bare Enter confirms the highlighted default — which is "Upgrade your plan"
-// on some versions. The option ORDER varies between versions, so we never assume
-// a position: we locate the cursor (❯) and the "Stop and wait" option and compute
-// the cursor moves needed to land on it.
-
-const MENU_CURSOR = '❯';
-const WAIT_OPTION_REGEX = /stop and wait for limit to reset/i;
-const MENU_OPTION_REGEX = /^\s*❯?\s*\d+\.\s/;
-
-// tailLines > 0 restricts to the last N lines: a LIVE menu sits at the prompt, so the
-// same menu text quoted in scrollback (a conversation about limits) must not make us
-// drive arrow keys + Enter into whatever is actually on screen.
-export function isRateLimitOptionsPrompt(text, tailLines = 0) {
-  let lines = stripAnsi(text).split('\n');
-  if (tailLines > 0) lines = lines.slice(-tailLines);
-  const t = lines.join('\n');
-  return /what do you want to do\?/i.test(t)
-    && WAIT_OPTION_REGEX.test(t)
-    && (/enter to confirm/i.test(t) || /esc to cancel/i.test(t) || t.includes(MENU_CURSOR));
-}
-
-// Cursor moves to reach the "Stop and wait for limit to reset" option, counted in
-// option steps: positive => press Down N times, negative => Up, 0 => already there.
-// Returns null when the layout can't be read (no cursor or option not found); the
-// caller MUST NOT press Enter in that case, to avoid confirming the wrong option.
-// tailLines mirrors isRateLimitOptionsPrompt so option counting ignores quoted menus.
-export function menuStepsToWaitOption(text, tailLines = 0) {
-  let lines = stripAnsi(text).split('\n');
-  if (tailLines > 0) lines = lines.slice(-tailLines);
-  const optionLines = lines.filter(l => MENU_OPTION_REGEX.test(l));
-  if (optionLines.length === 0) return null;
-  const cursorPos = optionLines.findIndex(l => l.includes(MENU_CURSOR));
-  const waitPos = optionLines.findIndex(l => WAIT_OPTION_REGEX.test(l));
-  if (cursorPos === -1 || waitPos === -1) return null;
-  return waitPos - cursorPos;
-}
-
-// --- Overload / transient API error detection (distinct from usage limits) ---
-// Claude Code already retries 5xx/529 internally; this only fires on a *sustained*
-// terminal error left in the pane. Patterns are case-insensitive regexes (same as
-// the usage-limit customPatterns), config-driven via `overload.patterns`. Kept
-// entirely separate from the usage-limit path above so the two never collide.
-//
-// Two guards keep this from firing on ordinary content (the historical bug: a bare
-// "503"/"529" in code under edit, an HTTP status in a quoted log, or "status.claude.com"
-// in a comment all looked identical to a live error):
-//   1. Patterns are ANCHORED to Claude Code's actual error render ("API Error: <code>"
-//      or the "overloaded_error" JSON type) — never a bare status number.
-//   2. Only the TAIL of the pane is inspected. A *terminal* error is the last thing
-//      Claude printed; the same digits sitting in scrollback the user scrolled past
-//      are not an error. Matching the full 20-line capture is what drove the false
-//      positives — a 503 far up the buffer kept re-triggering during unrelated work.
-
-// A real terminal error sits just above the input box (~5-6 variable lines: box
-// borders + input row(s) + footer). A multi-line JSON error body adds a few more, so
-// its anchor line can land ~10 rows from the bottom. 12 covers that with margin while
-// still trimming the top ~8 lines of the 20-line capture (where stale scrollback lives).
-const OVERLOAD_TAIL_LINES = 12;
-
-// Indicators that Claude is mid-flight and the pane is NOT in a terminal error state.
-// Two kinds: the streaming footer, and Claude Code's OWN internal-retry indicator.
-// While either is on screen the request's retries are not exhausted — acting now would
-// interrupt Claude's backoff. The transient error render is "API Error (529 …) ·
-// Retrying in 5s · attempt 3/10"; the colon form can also carry the "· Retrying" suffix
-// until exhausted, so we gate on the suffix itself, not just the parens form.
-const WORKING_PATTERNS = [
-  /esc to interrupt/i,        // the working/streaming footer ("… (esc to interrupt)")
-  /\besc\b.*\binterrupt\b/i,  // tolerate reordering/spacing in the same footer
-  /Retrying in\b/i,           // internal-retry suffix — retries not yet exhausted
-  /\battempt\s+\d+\/\d+/i,    // "attempt 3/10" companion to the retry suffix
-];
-
-function tail(text) {
-  return stripAnsi(text).split('\n').slice(-OVERLOAD_TAIL_LINES);
-}
-
-// Compile a config pattern (string → case-insensitive RegExp) once per call. Invalid
-// regexes are dropped rather than thrown (matches the usage-limit customPatterns path).
-function toRegexes(patterns) {
-  const out = [];
-  for (const p of patterns) {
-    if (p instanceof RegExp) { out.push(p); continue; }
-    if (typeof p !== 'string' || !p) continue;
-    try { out.push(new RegExp(p, 'i')); } catch { /* skip invalid */ }
-  }
-  return out;
-}
-
-// Returns { pattern, line } for the first overload pattern matching a tail line, else
-// null. Per-line (not whole-tail) so we can report WHICH line tripped it — invaluable
-// for diagnosing a future false positive (the original bug logged no reason at all).
-export function overloadMatch(text, patterns = []) {
-  if (!patterns || patterns.length === 0) return null;
-  const lines = tail(text);
-  if (!lines.join('').trim()) return null;
-  const regexes = toRegexes(patterns);
-  for (const line of lines) {
-    for (const r of regexes) {
-      if (r.test(line)) return { pattern: r.source, line: line.trim().slice(0, 200) };
-    }
-  }
-  return null;
-}
-
-export function detectOverload(text, patterns = []) {
-  return overloadMatch(text, patterns) !== null;
-}
-
-// --- Safeguard / AUP false-positive detection ---
-// A distinct failure mode from usage limits and 5xx overloads: the model's safeguards
-// flag the message (often a false positive — the error itself says it "may flag safe,
-// normal content"). It renders like:
-//   ● API Error: Fable 5's safeguards flagged this message (…/legal/aup). … Claude Code
-//     can't respond to this request with Fable 5.
-//     Double press esc to edit your last message, or try a different model with /model.
-// Because the flag is semi-random, an immediate re-send frequently clears it — but it
-// must be capped so a *sticky* flag doesn't loop forever. Tail-anchored like the others.
-// Anchor: a REAL flag always renders as an `API Error:` line. Requiring it nearby (same
-// wrap-tolerant window isRateLimited uses for limit/resets pairing) keeps the phrases
-// from firing on ordinary conversation — Claude quoting the AUP link or discussing
-// safeguard errors at an idle prompt must not trigger a retry. (DEFAULT_OVERLOAD learned
-// this the hard way; see its comment about bare status numbers.)
-const SAFEGUARD_ANCHOR = [/\bAPI Error\b/i];
-
-export function safeguardMatch(text, patterns = []) {
-  if (!patterns || patterns.length === 0) return null;
-  const lines = tail(text);
-  if (!lines.join('').trim()) return null;
-  const regexes = toRegexes(patterns);
-  for (let i = 0; i < lines.length; i++) {
-    for (const r of regexes) {
-      if (r.test(lines[i]) && hasNearbyMatch(lines, i, SAFEGUARD_ANCHOR)) {
-        return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
-      }
-    }
-  }
-  return null;
-}
-
-export function detectSafeguard(text, patterns = []) {
-  return safeguardMatch(text, patterns) !== null;
-}
-
-export function isWorking(text) {
-  const lines = tail(text);
-  return lines.some(line => WORKING_PATTERNS.some(p => p.test(line)));
-}
-
 export function findRateLimitMessage(text, customPatterns = []) {
   const lines = stripAnsi(text).split('\n');
 
-  // Scan from the bottom up — the most recent "resets" line is the one to
-  // parse. The Claude TUI never clears earlier rate-limit messages from
-  // scrollback, so a forward scan would lock onto a stale line (e.g. an old
-  // "resets 11:30am" lingering above a fresh "resets 4:30pm").
+  // Scan bottom-up so the most-recent reset line wins. Claude Code never clears
+  // earlier banners from scrollback, so a stale "resets 11:30am" can linger
+  // above a fresh "resets 4:30pm" — top-down would lock onto the stale one.
   for (let i = lines.length - 1; i >= 0; i--) {
     if (RESET_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }
 
-  // Fallback: any "limit" line, also scanned from the bottom.
+  // Fallback: most-recent "limit" line.
   for (let i = lines.length - 1; i >= 0; i--) {
     if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }

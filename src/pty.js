@@ -14,8 +14,9 @@
 // unavailable.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 const require = createRequire(import.meta.url);
@@ -138,6 +139,9 @@ export function findClaudeBinary() {
       .split(/\r?\n/)[0]
       .trim();
     if (out) return out;
-  } catch { /* fall through to bare name on PATH */ }
+  } catch { /* not on PATH (e.g. installed only as a shell alias) — try known locations */ }
+  for (const c of [join(homedir(), '.claude', 'local', 'claude'), join(homedir(), '.local', 'bin', 'claude')]) {
+    if (existsSync(c)) return c;
+  }
   return 'claude';
 }

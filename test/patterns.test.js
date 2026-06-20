@@ -75,6 +75,9 @@ describe('isRateLimited', () => {
   it('detects dated weekly limit "Resets by 4:00 AM Friday Apr 24"', () => {
     assert.equal(isRateLimited("You've hit your weekly limit\nResets by 4:00 AM Friday Apr 24"), true);
   });
+  it('detects a dated weekly limit given in 24-hour time (no am/pm)', () => {
+    assert.equal(isRateLimited("You've hit your weekly limit · resets May 28 at 19:00 (Europe/Madrid)"), true);
+  });
   it('does not treat a benign "session limit" mention as a rate limit', () => {
     assert.equal(isRateLimited('We were discussing the session limit feature in the meeting.'), false);
   });

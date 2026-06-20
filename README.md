@@ -145,6 +145,11 @@ Weekly (7-day) limits report a calendar date, e.g. `resets May 28 at 7pm
 (Europe/Madrid)`. The tool parses the full date and waits until it actually
 resets, however many days away that is.
 
+The reset time is parsed whether or not it carries an `am`/`pm` suffix — a
+24-hour clock such as `resets May 28 at 19:00 (Europe/Madrid)` is understood
+just the same. A bare 1–12 hour with no suffix (e.g. `at 7`) is treated as
+ambiguous and resolved to the soonest still-future time.
+
 ## Configuration
 
 Optional. Create `~/.claude-auto-retry.json`:

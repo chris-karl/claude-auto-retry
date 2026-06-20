@@ -7,13 +7,15 @@ const MONTHS = {
 };
 const MONTH_DAY_REGEX = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/i;  // "May 28"
 const DAY_MONTH_REGEX = /\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i;     // "28 May"
-const CLOCK_REGEX = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i;  // "7pm" / "4:00 AM" (am/pm required here)
+const CLOCK_REGEX = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i;  // "7pm" / "4:00 AM" / "19:00" (am/pm optional)
 
 // Weekly limits report a calendar date, e.g.
 //   "You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)"
 //   "Resets by 4:00 AM Friday Apr 24"
+//   "You've hit your weekly limit · resets May 28 at 19:00 (Europe/Madrid)"  (24-hour, no am/pm)
 // Parse the month/day and the clock time separately so the day number isn't
-// mistaken for the hour.
+// mistaken for the hour. The clock's am/pm is optional: a 24-hour value is taken
+// verbatim, while a bare 1-12 hour is marked ambiguous (resolved in calculateWaitMs).
 function parseDatedReset(text) {
   if (!/reset/i.test(text)) return null;
 
@@ -26,18 +28,27 @@ function parseDatedReset(text) {
   }
   if (month === undefined) return null;
 
-  // Strip the matched date so its day number can't be read as the clock hour.
-  const t = text.replace(dateStr, ' ').match(CLOCK_REGEX);
-  let hour = 0, minute = 0;
+  const tzMatch = text.match(/\(([^)]+)\)/);
+
+  // Strip the matched date AND the parenthesized timezone before reading the
+  // clock, so neither the day number nor a digit-bearing zone like "(GMT+5:30)"
+  // can be mistaken for the time (am/pm no longer anchors the clock match).
+  let rest = text.replace(dateStr, ' ');
+  if (tzMatch) rest = rest.replace(tzMatch[0], ' ');
+  const t = rest.match(CLOCK_REGEX);
+
+  let hour = 0, minute = 0, ambiguous = false;
   if (t) {
     hour = parseInt(t[1], 10);
     minute = t[2] ? parseInt(t[2], 10) : 0;
-    const ampm = t[3].toLowerCase();
+    const ampm = t[3] ? t[3].toLowerCase() : null;
     if (ampm === 'pm' && hour !== 12) hour += 12;
-    if (ampm === 'am' && hour === 12) hour = 0;
+    else if (ampm === 'am' && hour === 12) hour = 0;
+    // No am/pm on a 1-12 hour is ambiguous (could be either half of the day);
+    // a 24-hour value (>=13, or 0) is unambiguous and taken as-is.
+    else if (!ampm && hour >= 1 && hour <= 12) ambiguous = true;
   }
-  const tzMatch = text.match(/\(([^)]+)\)/);
-  return { hasDate: true, month, day, hour, minute, timezone: tzMatch ? tzMatch[1] : null };
+  return { hasDate: true, month, day, hour, minute, timezone: tzMatch ? tzMatch[1] : null, ambiguous };
 }
 
 export function parseResetTime(text) {
@@ -140,12 +151,25 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
   // that already happened, so leave it as-is (wait ≈ 0) rather than waiting ~12
   // months.
   if (parsed.hasDate) {
-    let candidate = getTargetTimestamp(parsed.hour, parsed.minute, { month: parsed.month, day: parsed.day });
-    if (candidate < now.getTime() - 2 * 86400_000) {
-      const yNow = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric' }).format(now), 10);
-      candidate = getTargetTimestamp(parsed.hour, parsed.minute, { year: yNow + 1, month: parsed.month, day: parsed.day });
-    }
-    return Math.max(0, candidate - now.getTime()) + marginSeconds * 1000;
+    // Resolve one clock reading to its exact future instant on the parsed date.
+    const datedCandidate = (h, m) => {
+      let c = getTargetTimestamp(h, m, { month: parsed.month, day: parsed.day });
+      if (c < now.getTime() - 2 * 86400_000) {
+        const yNow = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric' }).format(now), 10);
+        c = getTargetTimestamp(h, m, { year: yNow + 1, month: parsed.month, day: parsed.day });
+      }
+      return c;
+    };
+
+    // A clock without am/pm (ambiguous) yields two readings 12h apart; pick the
+    // soonest still-future one. If neither is future (a stale banner for a reset
+    // that just elapsed), fall back to the most recent → wait ≈ 0.
+    const candidates = parsed.ambiguous
+      ? [datedCandidate(parsed.hour, parsed.minute), datedCandidate(parsed.hour + 12, parsed.minute)]
+      : [datedCandidate(parsed.hour, parsed.minute)];
+    const future = candidates.filter((c) => c > now.getTime());
+    const chosen = future.length ? Math.min(...future) : Math.max(...candidates);
+    return Math.max(0, chosen - now.getTime()) + marginSeconds * 1000;
   }
 
   if (parsed.ambiguous) {

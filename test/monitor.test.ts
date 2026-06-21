@@ -1,14 +1,20 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMonitorState, processOneTick } from '../src/monitor.js';
-import { DEFAULT_CONFIG } from '../src/config.js';
+import { createMonitorState, processOneTick } from '../src/monitor.ts';
+import type { ScreenAdapter } from '../src/monitor.ts';
+import { DEFAULT_CONFIG } from '../src/config.ts';
 
-function mockScreen(screenContent = '', { failSend = false } = {}) {
-  const s = {
+interface MockScreen extends ScreenAdapter {
+  _sent: string[];
+  _escaped: number;
+}
+
+function mockScreen(screenContent = '', { failSend = false }: { failSend?: boolean } = {}): MockScreen {
+  const s: MockScreen = {
     _sent: [],
     _escaped: 0,
     capture: async () => screenContent,
-    send: async (text) => {
+    send: async (text: string) => {
       if (failSend) throw new Error('PTY destroyed');
       s._sent.push(text);
     },
@@ -54,7 +60,7 @@ describe('processOneTick', () => {
     assert.equal(s._sent[0], DEFAULT_CONFIG.retryMessage);
     assert.equal(st.attempts, 1);
     assert.equal(st.retrySent, true);
-    // Should stay in 'waiting' with a cooldown to let Claude process
+    // Should stay in 'waiting' with a cooldown to let Claude process.
     assert.equal(st.status, 'waiting');
     assert.ok(st.waitUntil > Date.now());
   });
@@ -93,7 +99,7 @@ describe('processOneTick', () => {
     const st = createMonitorState();
     st.waitUntil = Date.now() - 1000; st.status = 'waiting'; st.attempts = 5;
     assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'max-retries');
-    // Should stay in 'waiting' to avoid re-detection loop
+    // Should stay in 'waiting' to avoid re-detection loop.
     assert.equal(st.status, 'waiting');
     assert.ok(st.waitUntil > Date.now());
     assert.equal(s._sent.length, 0);
@@ -102,7 +108,7 @@ describe('processOneTick', () => {
     const s = mockScreen('Claude is working normally');
     const st = createMonitorState();
     st.waitUntil = Date.now() - 1000; st.status = 'waiting'; st.attempts = 10;
-    // Rate limit cleared → should detect user-continued before max-retries check
+    // Rate limit cleared → should detect user-continued before max-retries check.
     assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
     assert.equal(st.attempts, 0);
   });

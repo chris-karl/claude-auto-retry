@@ -8,7 +8,7 @@ When Claude Code shows *"You've hit your session limit · resets 3pm"* (or the w
 
 [![npm version](https://img.shields.io/npm/v/claude-auto-retry.svg)](https://www.npmjs.com/package/claude-auto-retry)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
+[![Node.js >= 23.6](https://img.shields.io/badge/node-%3E%3D23.6-brightgreen.svg)](https://nodejs.org)
 
 ---
 
@@ -203,7 +203,9 @@ claude-auto-retry version     # Print version
 
 ### Requirements
 
-- **Node.js** >= 18
+- **Node.js** >= 23.6 — the tool's modules are TypeScript run directly via Node's
+  built-in type stripping (no build step), which is enabled by default from Node
+  23.6 onward.
 - **node-pty** — installed automatically as a dependency. Ships prebuilt binaries
   for macOS and Windows; on Linux it compiles on install, which needs a C/C++
   toolchain and Python (e.g. `apt-get install -y build-essential python3`).
@@ -271,8 +273,11 @@ Contributions are welcome! Here's how to get started:
 git clone https://github.com/cheapestinference/claude-auto-retry.git
 cd claude-auto-retry
 npm install         # builds node-pty (Linux needs build tools)
-npm test            # Run all tests
+npm run check       # type-check + lint + dead-code scan + tests
 ```
+
+The source is TypeScript run directly via Node's type stripping — there is no
+build step. `tsc` is used only to type-check (`--noEmit`).
 
 Then install the CLI globally from your local checkout, either way:
 
@@ -292,18 +297,22 @@ After either, run `claude-auto-retry install` to inject the shell wrapper.
 
 ```
 claude-auto-retry/
-├── bin/cli.js              # CLI: install/uninstall/status/logs/version
+├── bin/cli.ts                # CLI: install/uninstall/status/logs/version
 ├── src/
-│   ├── patterns.js         # Rate limit detection + ANSI stripping
-│   ├── time-parser.js      # Reset time parsing with timezone support
-│   ├── config.js           # Config loading + validation
-│   ├── logger.js           # File-based logging with rotation
-│   ├── pty.js              # PTY host + headless terminal emulator (node-pty + @xterm/headless)
-│   ├── monitor.js          # Core monitoring loop + retry logic
-│   ├── launcher.js         # Process orchestration + I/O mirroring
-│   ├── postinstall.js      # Restores node-pty spawn-helper exec bit after npm install
-│   └── wrapper.sh          # Shell function template
-├── test/                   # Tests
+│   ├── patterns.ts           # Rate limit detection + ANSI stripping
+│   ├── time-parser.ts        # Reset time parsing with timezone support
+│   ├── config.ts             # Config loading + validation
+│   ├── logger.ts             # File-based logging with rotation
+│   ├── pty.ts                # PTY host + headless terminal emulator (node-pty + @xterm/headless)
+│   ├── monitor.ts            # Core monitoring loop + retry logic
+│   ├── launcher.ts           # Process orchestration + I/O mirroring
+│   ├── postinstall.ts        # Restores node-pty spawn-helper exec bit after npm install
+│   └── wrapper.sh            # Shell function template
+├── test/                     # Tests (node:test, *.test.ts)
+├── tsconfig.json             # Type-check config (tsc --noEmit; no build step)
+├── eslint.config.js          # ESLint flat config (typescript-eslint)
+├── knip.json                 # Dead-code / unused-dependency config
+├── .github/workflows/ci.yml  # CI: typecheck + lint + knip + tests
 ├── package.json
 ├── LICENSE
 └── README.md
@@ -315,13 +324,19 @@ claude-auto-retry/
 - **Headless terminal emulator** — output is fed to `@xterm/headless`, giving the real rendered screen for detection instead of a noisy raw byte stream. This eliminates the foreground-process guessing and stale-frame false positives the tmux version had to work around.
 - **Iterative DST correction** — timezone offset is computed via 3-iteration convergence loop, not a single-shot formula that breaks at DST boundaries.
 - **Config validation** — invalid user config values fall back to safe defaults instead of producing NaN/undefined behavior.
+- **TypeScript, no build step** — modules are written in TypeScript and run directly via Node's built-in type stripping (Node >= 23.6); `tsc --noEmit` type-checks them in CI alongside ESLint and a knip dead-code scan. There is no compile or `dist/` step, so what runs is exactly what's in `src/`.
 
 ### Running Tests
 
 ```bash
 npm test                              # All tests
-node --test test/patterns.test.js     # Single file
+node --test test/patterns.test.ts     # Single file
 node --test --watch test/             # Watch mode
+
+npm run typecheck                     # tsc --noEmit (type errors only)
+npm run lint                          # eslint
+npm run knip                          # unused files / exports / dependencies
+npm run check                         # typecheck + lint + knip + tests
 ```
 
 ### Submitting Changes
@@ -330,7 +345,7 @@ node --test --watch test/             # Watch mode
 2. Create a feature branch (`git checkout -b feat/my-feature`)
 3. Write tests first (TDD)
 4. Make your changes
-5. Ensure all tests pass (`npm test`)
+5. Ensure everything passes (`npm run check` — typecheck, lint, knip, tests)
 6. Submit a Pull Request
 
 ### Areas for Contribution

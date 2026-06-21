@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isClaudeBusy } from '../src/patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isClaudeBusy } from '../src/patterns.ts';
 
 describe('stripAnsi', () => {
   it('removes bold codes', () => {
@@ -175,15 +175,15 @@ describe('findRateLimitMessage', () => {
   });
   it('returns Resets line when limit and resets on different lines', () => {
     const text = '5-hour limit reached\nResets at 3pm (UTC)';
-    assert.ok(findRateLimitMessage(text).includes('3pm'));
+    assert.ok(findRateLimitMessage(text)!.includes('3pm'));
   });
   it('returns the freshest reset line when a stale one lingers above', () => {
     const text = 'hit your limit · resets 11:30am (UTC)\nworked a while\nhit your limit · resets 4:30pm (UTC)';
-    assert.ok(findRateLimitMessage(text).includes('4:30pm'));
+    assert.ok(findRateLimitMessage(text)!.includes('4:30pm'));
   });
   it('returns the dated weekly reset line', () => {
     const text = "You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)";
-    assert.ok(findRateLimitMessage(text).includes('May 28'));
+    assert.ok(findRateLimitMessage(text)!.includes('May 28'));
   });
 });
 

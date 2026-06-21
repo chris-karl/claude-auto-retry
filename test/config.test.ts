@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadConfig, DEFAULT_CONFIG } from '../src/config.js';
+import { loadConfig, DEFAULT_CONFIG } from '../src/config.ts';
 
 describe('DEFAULT_CONFIG', () => {
   it('has expected defaults', () => {

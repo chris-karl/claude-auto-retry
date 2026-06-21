@@ -2,22 +2,28 @@ import { appendFile, mkdir, readdir, unlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
+export interface Logger {
+  info: (msg: string) => Promise<void>;
+  warn: (msg: string) => Promise<void>;
+  error: (msg: string) => Promise<void>;
+}
+
 export const DEFAULT_LOG_DIR = join(homedir(), '.claude-auto-retry', 'logs');
 const MAX_AGE_DAYS = 7;
 const CLEANUP_INTERVAL_MS = 3600_000;
 let lastCleanup = 0;
 
-function timestamp() {
+function timestamp(): string {
   return new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
 }
 
-// Path to today's log file. Exported so the CLI readers (status/logs) share the
-// exact directory + filename layout the writer uses, with no risk of drift.
-export function todayFile(dir = DEFAULT_LOG_DIR) {
+// Path to today's log file. Exported so the CLI readers (status/logs) use the
+// exact same directory + filename layout as the writer, with no risk of drift.
+export function todayFile(dir: string = DEFAULT_LOG_DIR): string {
   return join(dir, `${new Date().toISOString().split('T')[0]}.log`);
 }
 
-async function cleanup(dir) {
+async function cleanup(dir: string): Promise<void> {
   if (Date.now() - lastCleanup < CLEANUP_INTERVAL_MS) return;
   lastCleanup = Date.now();
   try {
@@ -31,12 +37,12 @@ async function cleanup(dir) {
   } catch { /* ignore */ }
 }
 
-export function createLogger(dir = DEFAULT_LOG_DIR) {
+export function createLogger(dir: string = DEFAULT_LOG_DIR): Logger {
   let dirCreated = false;
-  async function ensureDir() {
+  async function ensureDir(): Promise<void> {
     if (!dirCreated) { await mkdir(dir, { recursive: true }); dirCreated = true; }
   }
-  async function log(level, message) {
+  async function log(level: string, message: string): Promise<void> {
     await ensureDir();
     await appendFile(todayFile(dir), `[${timestamp()}] [${level}] ${message}\n`);
     cleanup(dir);

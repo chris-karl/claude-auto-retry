@@ -81,6 +81,22 @@ describe('isRateLimited', () => {
   it('does not treat a benign "session limit" mention as a rate limit', () => {
     assert.equal(isRateLimited('We were discussing the session limit feature in the meeting.'), false);
   });
+  it('ignores the passive "used N% of your session limit" usage gauge', () => {
+    assert.equal(isRateLimited("You've used 98% of your session limit · resets 8:40pm (Europe/Berlin) · /upgrade to keep using Claude Code"), false);
+  });
+  it('ignores the usage gauge as it appears in the footer (with shortcuts hint)', () => {
+    assert.equal(isRateLimited("? for shortcuts · ← for agents          You've used 98% of your session limit · resets 8:40pm (Europe/Berlin) · /upgrade to keep using Claude Code"), false);
+  });
+  it('ignores the "used N% of your weekly limit" gauge too', () => {
+    assert.equal(isRateLimited("You've used 75% of your weekly limit · resets May 28 at 7pm (Europe/Madrid)"), false);
+  });
+  it('still detects a real hit banner even when the usage gauge is also on screen', () => {
+    const text = [
+      "You've used 98% of your session limit · resets 8:40pm (Europe/Berlin)",
+      "You've hit your session limit · resets 8:40pm (Europe/Berlin)",
+    ].join('\n');
+    assert.equal(isRateLimited(text), true);
+  });
 });
 
 describe('isLimitMenuPrompt', () => {

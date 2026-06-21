@@ -37,6 +37,17 @@ const LIMIT_PATTERNS = [
   /try again in/i,                                   // "try again in X hours" (implies rate limiting)
 ];
 
+// Claude Code shows a PASSIVE usage gauge in its footer as you approach a limit,
+// e.g. "You've used 98% of your session limit · resets 8:40pm (Europe/Berlin) ·
+// /upgrade to keep using Claude Code". That line contains both "session limit"
+// and a "resets …" time, so it would otherwise trip isRateLimited — but you are
+// NOT blocked yet (you can keep working), so it must be ignored. The actual
+// limit-HIT banner uses different wording ("hit"/"reached") and the blocking
+// menu is detected separately, so dropping every "used N% of …" gauge is safe.
+const USAGE_GAUGE_PATTERNS = [
+  /used\s+\d+(?:\.\d+)?%\s+of\s+(?:your|the)\b/i,   // "used 98% of your session limit"
+];
+
 const MONTH = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)';
 
 const RESET_PATTERNS = [
@@ -108,8 +119,11 @@ export function isRateLimited(text, customPatterns = []) {
   }
 
   // Find a "limit" line with a "resets" line nearby (works for both
-  // single-line messages and multi-line TUI renders)
+  // single-line messages and multi-line TUI renders). Skip the passive usage
+  // gauge ("You've used N% of your … limit") — it carries both "limit" and a
+  // "resets …" time but means you can still work, not that you're blocked.
   for (let i = 0; i < lines.length; i++) {
+    if (USAGE_GAUGE_PATTERNS.some(p => p.test(lines[i]))) continue;
     if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) {
       if (hasNearbyMatch(lines, i, RESET_PATTERNS)) return true;
     }

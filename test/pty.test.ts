@@ -8,7 +8,7 @@ import {
   writeToTerminal,
   readScreen,
   ensureNativeHelperExecutable,
-} from '../src/pty.js';
+} from '../src/pty.ts';
 
 describe('readScreen', () => {
   it('renders written lines as plain text', async () => {
@@ -22,9 +22,8 @@ describe('readScreen', () => {
 
   it('reflects redraws, not stale frames (the reason for the emulator)', async () => {
     const term = await createTerminal(80, 24);
-    // Print a fake rate-limit, then clear the screen and redraw fresh output —
-    // a raw byte buffer would still contain the stale message; the emulator
-    // must not.
+    // Print a fake rate-limit, then clear the screen and redraw fresh output — a
+    // raw byte buffer would still contain the stale message; the emulator must not.
     await writeToTerminal(term, 'You\'ve hit your limit · resets 3pm (UTC)\r\n');
     await writeToTerminal(term, '\x1b[2J\x1b[H'); // clear screen + home cursor
     await writeToTerminal(term, 'Working on your task...\r\n');
@@ -48,7 +47,7 @@ describe('ensureNativeHelperExecutable', () => {
   const unix = { skip: process.platform === 'win32' };
 
   // Build a throwaway node-pty layout: <root>/<dir>/spawn-helper at `mode`.
-  function fakePty(dir, mode) {
+  function fakePty(dir: string, mode: number): { root: string; helper: string } {
     const root = mkdtempSync(join(tmpdir(), 'car-pty-'));
     const helperDir = join(root, dir);
     mkdirSync(helperDir, { recursive: true });

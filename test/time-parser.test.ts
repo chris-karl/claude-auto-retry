@@ -1,63 +1,63 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseResetTime, calculateWaitMs } from '../src/time-parser.js';
+import { parseResetTime, calculateWaitMs } from '../src/time-parser.ts';
 
 describe('parseResetTime', () => {
   it('parses "resets 3pm (Europe/Dublin)"', () => {
-    const r = parseResetTime('5-hour limit reached - resets 3pm (Europe/Dublin)');
+    const r = parseResetTime('5-hour limit reached - resets 3pm (Europe/Dublin)')!;
     assert.equal(r.hour, 15); assert.equal(r.minute, 0);
     assert.equal(r.timezone, 'Europe/Dublin');
   });
   it('parses "resets at 2pm (America/New_York)"', () => {
-    const r = parseResetTime('Usage limit. Resets at 2pm (America/New_York)');
+    const r = parseResetTime('Usage limit. Resets at 2pm (America/New_York)')!;
     assert.equal(r.hour, 14); assert.equal(r.timezone, 'America/New_York');
   });
   it('parses "resets 15:30 (Asia/Kolkata)"', () => {
-    const r = parseResetTime('resets 15:30 (Asia/Kolkata)');
+    const r = parseResetTime('resets 15:30 (Asia/Kolkata)')!;
     assert.equal(r.hour, 15); assert.equal(r.minute, 30);
   });
   it('parses 12pm as noon', () => {
-    const r = parseResetTime('resets 12pm (UTC)');
+    const r = parseResetTime('resets 12pm (UTC)')!;
     assert.equal(r.hour, 12);
   });
   it('parses 12am as midnight', () => {
-    const r = parseResetTime('resets 12am (UTC)');
+    const r = parseResetTime('resets 12am (UTC)')!;
     assert.equal(r.hour, 0);
   });
   it('handles no timezone', () => {
-    const r = parseResetTime('resets 3pm');
+    const r = parseResetTime('resets 3pm')!;
     assert.equal(r.hour, 15); assert.equal(r.timezone, null);
   });
   it('returns null for unparseable text', () => {
     assert.equal(parseResetTime('some random text'), null);
   });
   it('parses "try again in 5 minutes" as relative time', () => {
-    const r = parseResetTime('try again in 5 minutes');
+    const r = parseResetTime('try again in 5 minutes')!;
     assert.ok(r.relative);
     assert.equal(r.waitMs, 5 * 60_000);
   });
   it('parses "try again in 2 hours" as relative time', () => {
-    const r = parseResetTime('try again in 2 hours');
+    const r = parseResetTime('try again in 2 hours')!;
     assert.ok(r.relative);
     assert.equal(r.waitMs, 2 * 3_600_000);
   });
   it('parses "wait 30 mins" as relative time', () => {
-    const r = parseResetTime('wait 30 mins');
+    const r = parseResetTime('wait 30 mins')!;
     assert.ok(r.relative);
     assert.equal(r.waitMs, 30 * 60_000);
   });
   it('parses "resets in: 3 hours" as relative time', () => {
-    const r = parseResetTime('usage limit · resets in: 3 hours');
+    const r = parseResetTime('usage limit · resets in: 3 hours')!;
     assert.ok(r.relative);
     assert.equal(r.waitMs, 3 * 3_600_000);
   });
   it('parses "resets in 2 hours" as relative time', () => {
-    const r = parseResetTime('resets in 2 hours');
+    const r = parseResetTime('resets in 2 hours')!;
     assert.ok(r.relative);
     assert.equal(r.waitMs, 2 * 3_600_000);
   });
   it('parses dated weekly reset "resets May 28 at 7pm (Europe/Madrid)"', () => {
-    const r = parseResetTime("You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)");
+    const r = parseResetTime("You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)")!;
     assert.equal(r.hasDate, true);
     assert.equal(r.month, 4);   // May (0-indexed)
     assert.equal(r.day, 28);
@@ -66,7 +66,7 @@ describe('parseResetTime', () => {
     assert.equal(r.timezone, 'Europe/Madrid');
   });
   it('parses dated weekly reset "Resets by 4:00 AM Friday Apr 24" (day-of-week ignored, no tz)', () => {
-    const r = parseResetTime('Resets by 4:00 AM Friday Apr 24');
+    const r = parseResetTime('Resets by 4:00 AM Friday Apr 24')!;
     assert.equal(r.hasDate, true);
     assert.equal(r.month, 3);   // Apr
     assert.equal(r.day, 24);
@@ -75,12 +75,12 @@ describe('parseResetTime', () => {
     assert.equal(r.timezone, null);
   });
   it('does not read the date day number as the clock hour', () => {
-    const r = parseResetTime('resets May 28 at 7pm (UTC)');
+    const r = parseResetTime('resets May 28 at 7pm (UTC)')!;
     assert.equal(r.hour, 19);   // 7pm, not 28
     assert.equal(r.day, 28);
   });
   it('parses a dated weekly reset given in 24-hour time (no am/pm)', () => {
-    const r = parseResetTime("You've hit your weekly limit · resets May 28 at 19:00 (Europe/Madrid)");
+    const r = parseResetTime("You've hit your weekly limit · resets May 28 at 19:00 (Europe/Madrid)")!;
     assert.equal(r.hasDate, true);
     assert.equal(r.month, 4);   // May
     assert.equal(r.day, 28);
@@ -90,7 +90,7 @@ describe('parseResetTime', () => {
     assert.equal(r.timezone, 'Europe/Madrid');
   });
   it('parses a 24-hour "Resets by 19:00 Friday Apr 24" (day-of-week + month/day)', () => {
-    const r = parseResetTime('Resets by 19:00 Friday Apr 24');
+    const r = parseResetTime('Resets by 19:00 Friday Apr 24')!;
     assert.equal(r.hasDate, true);
     assert.equal(r.month, 3);   // Apr
     assert.equal(r.day, 24);
@@ -98,13 +98,13 @@ describe('parseResetTime', () => {
     assert.equal(r.minute, 0);
   });
   it('marks a bare 1-12 dated hour without am/pm as ambiguous', () => {
-    const r = parseResetTime('resets May 28 at 7 (UTC)');
+    const r = parseResetTime('resets May 28 at 7 (UTC)')!;
     assert.equal(r.hasDate, true);
     assert.equal(r.hour, 7);
     assert.equal(r.ambiguous, true);
   });
   it('does not misread a digit-bearing timezone as the dated clock', () => {
-    const r = parseResetTime('resets May 28 at 19:00 (GMT+5:30)');
+    const r = parseResetTime('resets May 28 at 19:00 (GMT+5:30)')!;
     assert.equal(r.hour, 19);   // 19:00, not 5:30 from the zone
     assert.equal(r.minute, 0);
   });

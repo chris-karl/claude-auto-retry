@@ -4,15 +4,19 @@
   "description": "Automatically retry Claude Code sessions when hitting Anthropic subscription rate limits",
   "type": "module",
   "bin": {
-    "claude-auto-retry": "./bin/cli.js"
+    "claude-auto-retry": "./bin/cli.ts"
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
-    "postinstall": "node src/postinstall.js"
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "knip": "knip",
+    "check": "npm run typecheck && npm run lint && npm run knip && npm test",
+    "postinstall": "node src/postinstall.ts"
   },
   "license": "MIT",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=23.6.0"
   },
   "keywords": [
     "claude",
@@ -36,5 +40,14 @@
   "dependencies": {
     "@xterm/headless": "^6.0.0",
     "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.0.0",
+    "eslint": "^10.5.0",
+    "globals": "^17.6.0",
+    "knip": "^6.17.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1"
   }
 }

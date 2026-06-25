@@ -1,20 +1,76 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, detectOverload, isWorking } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 
 const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
+const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
 
 export function createMonitorState() {
-  return { status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null };
+  return {
+    status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null,
+    // Overload-retry sub-state, kept distinct from the usage-reset fields above.
+    overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0,
+  };
 }
 
-export async function processOneTick(state, tmuxAdapter, pane, config, isAlive) {
+// --- Overload backoff schedule (pure, testable) ---
+// Wait backoffSeconds[i] for attempt i; once the array is exhausted, steadyStateSeconds.
+export function overloadBaseWaitMs(attemptIndex, overload) {
+  const { backoffSeconds, steadyStateSeconds } = overload;
+  const secs = attemptIndex < backoffSeconds.length ? backoffSeconds[attemptIndex] : steadyStateSeconds;
+  return secs * 1000;
+}
+
+export function applyJitter(ms, jitterPct, rand = Math.random) {
+  if (!jitterPct) return ms;
+  const factor = 1 + (rand() * 2 - 1) * (jitterPct / 100);  // ±jitterPct%
+  return Math.max(0, Math.round(ms * factor));
+}
+
+export function nextOverloadWaitMs(attemptIndex, overload, rand = Math.random) {
+  return applyJitter(overloadBaseWaitMs(attemptIndex, overload), overload.jitterPct, rand);
+}
+
+function resetOverload(state) {
+  state.overloadAttempts = 0;
+  state.overloadTotalWaitMs = 0;
+  state.overloadWaitUntil = 0;
+}
+
+function enterUsageWait(state, stripped, config) {
+  const message = findRateLimitMessage(stripped, config.customPatterns);
+  state.lastRateLimitMessage = message;
+  const parsed = message ? parseResetTime(message) : null;
+  state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+  state.status = 'waiting';
+  return 'waiting';
+}
+
+function enterOverload(state, overload, rand) {
+  const capMs = overload.maxTotalWaitMinutes * 60_000;
+  resetOverload(state);
+  state.status = 'overload';
+  const w = nextOverloadWaitMs(0, overload, rand);
+  if (w > capMs) {
+    // Degenerate config (first backoff already exceeds the cap): force the cap to
+    // trip on the next tick rather than entering a real retry loop.
+    state.overloadTotalWaitMs = capMs;
+    state.overloadWaitUntil = 0;
+    return 'overload-detected';
+  }
+  state.overloadTotalWaitMs = w;
+  state.overloadWaitUntil = Date.now() + w;
+  return 'overload-detected';
+}
+
+export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, rand = Math.random) {
   if (!isAlive()) return 'exit';
 
   const raw = await tmuxAdapter.capturePane(pane, 20);
   const stripped = stripAnsi(raw);
+  const overload = config.overload;
 
   if (state.status === 'waiting') {
     if (Date.now() < state.waitUntil) return 'waiting';
@@ -58,13 +114,89 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive) 
     return 'retried';
   }
 
+  if (state.status === 'overload') {
+    if (Date.now() < state.overloadWaitUntil) return 'overload-waiting';
+    if (!isAlive()) return 'exit';
+
+    const capMs = overload.maxTotalWaitMinutes * 60_000;
+
+    // Usage-limit takes precedence: hand off to the (hours-scale) reset path.
+    if (isRateLimited(stripped, config.customPatterns)) {
+      resetOverload(state);
+      return enterUsageWait(state, stripped, config);
+    }
+
+    // Overload text gone → recovered. Back to plain monitoring.
+    if (!detectOverload(stripped, overload.patterns)) {
+      state.status = 'monitoring';
+      resetOverload(state);
+      return 'overload-cleared';
+    }
+
+    // Terminal-state gate: if Claude is actively working (its own internal retry
+    // or a fresh response is streaming), the error is NOT terminal. Defer without
+    // consuming an attempt so we never double-drive a live session.
+    if (isWorking(stripped)) {
+      state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'overload-working';
+    }
+
+    // Mandatory cap: give up loudly rather than hammer a genuinely-down endpoint
+    // or mask a real outage. Long cooldown to avoid re-detecting the stale error.
+    if (state.overloadTotalWaitMs >= capMs) {
+      state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      return 'overload-gave-up';
+    }
+
+    // Foreground safety, reused from the usage path: only act when claude/node is
+    // the foreground process. (See the gating decision in the README.)
+    const isFg = await tmuxAdapter.isClaudeForeground();
+    let foregroundOk = isFg === true;
+    let fg = null;
+    if (!foregroundOk) {
+      fg = await tmuxAdapter.getPaneCommand(pane);
+      const fgCommands = config.foregroundCommands || DEFAULT_FOREGROUND_COMMANDS;
+      foregroundOk = fgCommands.some(c => fg.toLowerCase().includes(c));
+    }
+
+    if (!foregroundOk) {
+      // Distinguish "claude exited to the shell" (error visible above a shell
+      // prompt) from "some other foreground app", for diagnostics + opt-in relaunch.
+      const lc = (fg || '').toLowerCase();
+      const isShell = lc !== '' && SHELL_COMMANDS.some(s => lc === s || lc.includes(s));
+      state._lastForeground = fg;
+      if (isShell && overload.relaunchOnExit) {
+        state.overloadAttempts++;
+        const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);
+        state.overloadTotalWaitMs += w;
+        state.overloadWaitUntil = Date.now() + w;
+        await tmuxAdapter.sendKeys(pane, overload.relaunchCommand);
+        return 'overload-relaunched';
+      }
+      state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return isShell ? 'overload-exited-to-shell' : 'skipped-not-claude';
+    }
+
+    // Alive at the prompt → send the retry, then schedule the next backoff window.
+    // Increment + schedule BEFORE sendKeys so a send failure still consumes the slot.
+    state.overloadAttempts++;
+    const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);
+    state.overloadTotalWaitMs += w;
+    state.overloadWaitUntil = Date.now() + w;
+    await tmuxAdapter.sendKeys(pane, overload.retryMessage);
+    return 'overload-retried';
+  }
+
+  // --- monitoring ---
+  // Usage-limit (hours-scale reset) takes precedence over overload (seconds-scale).
   if (isRateLimited(stripped, config.customPatterns)) {
-    const message = findRateLimitMessage(stripped, config.customPatterns);
-    state.lastRateLimitMessage = message;
-    const parsed = message ? parseResetTime(message) : null;
-    state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
-    state.status = 'waiting';
-    return 'waiting';
+    return enterUsageWait(state, stripped, config);
+  }
+
+  if (overload && overload.enabled
+      && detectOverload(stripped, overload.patterns)
+      && !isWorking(stripped)) {
+    return enterOverload(state, overload, rand);
   }
 
   return 'monitoring';
@@ -97,6 +229,19 @@ export async function startMonitor(pane, pid) {
       if (result === 'user-continued') await logger.info('User already continued. Attempt counter reset.');
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);
+      if (result === 'overload-detected') {
+        const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
+        await logger.warn(`Overload/transient API error detected (sustained). Backing off ${secs}s before retry. NOTE: Claude Code retries 5xx/529 internally — this only fires on terminal overload.`);
+      }
+      if (result === 'overload-retried') {
+        const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
+        await logger.info(`Overload retry sent (attempt ${state.overloadAttempts}). Next backoff ${secs}s. Cumulative wait ${Math.round(state.overloadTotalWaitMs / 1000)}s.`);
+      }
+      if (result === 'overload-working') await logger.info('Overload text present but Claude is working (internal retry/streaming). Deferring — not terminal.');
+      if (result === 'overload-cleared') await logger.info('Overload cleared. Resuming normal monitoring.');
+      if (result === 'overload-relaunched') await logger.warn(`Claude exited to shell on overload; relaunched via "${config.overload.relaunchCommand}" (relaunchOnExit on, attempt ${state.overloadAttempts}).`);
+      if (result === 'overload-exited-to-shell') await logger.warn(`Overload error left claude exited to the shell ("${state._lastForeground}"). Not auto-relaunching (relaunchOnExit off). Re-run "claude --continue" to resume, or set overload.relaunchOnExit:true.`);
+      if (result === 'overload-gave-up') await logger.warn(`Overload backoff cap reached (maxTotalWaitMinutes=${config.overload.maxTotalWaitMinutes}). Giving up — endpoint may be genuinely down (check status.claude.com). Will not retry until the error clears.`);
     } catch (err) {
       consecutiveErrors++;
       await logger.error(`Monitor tick error: ${err.message}`).catch(() => {});

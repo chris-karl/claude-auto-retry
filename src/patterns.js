@@ -70,6 +70,31 @@ export function isRateLimited(text, customPatterns = []) {
   return false;
 }
 
+// --- Overload / transient API error detection (distinct from usage limits) ---
+// Claude Code already retries 5xx/529 internally; this only fires on a *sustained*
+// terminal error left in the pane. Patterns are plain substrings (case-insensitive),
+// config-driven via the `overload.patterns` block. Kept entirely separate from the
+// usage-limit path above so the two never collide.
+
+// Active-work indicators in the Claude Code TUI footer. While any of these is on
+// screen, Claude is mid-flight (its own internal retry may be running), so an
+// overload line in the scrollback is NOT terminal — we must not drive the session.
+const WORKING_PATTERNS = [
+  /esc to interrupt/i,        // the working/streaming footer ("… (esc to interrupt)")
+  /\besc\b.*\binterrupt\b/i,  // tolerate reordering/spacing in the same footer
+];
+
+export function detectOverload(text, patterns = []) {
+  if (!patterns || patterns.length === 0) return false;
+  const haystack = stripAnsi(text).toLowerCase();
+  return patterns.some(p => typeof p === 'string' && p && haystack.includes(p.toLowerCase()));
+}
+
+export function isWorking(text) {
+  const stripped = stripAnsi(text);
+  return WORKING_PATTERNS.some(p => p.test(stripped));
+}
+
 export function findRateLimitMessage(text, customPatterns = []) {
   const lines = stripAnsi(text).split('\n');
 

@@ -74,6 +74,17 @@ describe('processOneTick', () => {
     assert.notEqual(s.status, 'waiting');
   });
 
+  // --- Regression: a menu only quoted in scrollback is NOT the live prompt. Driving
+  //     arrow keys + Enter on it would act on whatever is actually on screen. ---
+  it('does NOT drive a /rate-limit-options menu only quoted above the live tail', async () => {
+    const pane = [...MENU_UPGRADE_FIRST.split('\n'), ...Array(12).fill('● unrelated work below the quoted menu'), '❯ '].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    const r = await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true);
+    assert.notEqual(r, 'menu-confirmed');
+    assert.equal(t._keys.length, 0);   // no arrow/Enter keys driven
+  });
+
   it('refuses to press Enter when the menu layout is unreadable (#19)', async () => {
     // Cursor marker absent → we cannot tell which option is highlighted.
     const noCursor = ['What do you want to do?', '  1. Upgrade your plan', '  2. Stop and wait for limit to reset', 'Enter to confirm'].join('\n');
@@ -105,6 +116,38 @@ describe('processOneTick', () => {
     const s = createMonitorState();
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
     assert.ok(s.waitUntil > Date.now());
+  });
+
+  // --- Regression: do not spam an already-resumed session. The usage path used to
+  //     re-send every poll (up to maxRetries) while the limit banner lingered in
+  //     scrollback after a successful resume — observed live as 5 injections into a
+  //     working session. The isWorking gate stops the moment Claude resumes. ---
+  it('does NOT re-send once Claude has resumed and is working', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)\n· Doing… (esc to interrupt)');
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 1;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(t._sent.length, 0);          // never injects into the working session
+    assert.equal(s.status, 'monitoring');
+    assert.equal(s.attempts, 0);
+  });
+
+  // --- Regression: self-referential false positive. A limit banner only quoted in
+  //     scrollback (a conversation discussing limits, a stale banner scrolled past) is
+  //     NOT the live state. Tail-anchoring stops it from driving a retry. ---
+  it('does NOT enter a wait for a limit banner buried above the live tail', async () => {
+    const pane = ['You hit your session limit · resets 3pm (UTC)', ...Array(15).fill('● working on unrelated code'), '❯ '].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'monitoring');
+    assert.equal(s.status, 'monitoring');
+    assert.equal(t._sent.length, 0);
+  });
+  it('still enters a wait when the limit banner is in the live tail', async () => {
+    const pane = ['earlier output', 'more output', "You've hit your session limit · resets 3pm (UTC)"].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
   });
   it('retries when Claude process is in foreground (fixes macOS zsh issue)', async () => {
     const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'zsh', true);

@@ -7,6 +7,10 @@ import { readStopFailureEvent, clearStopFailureEvent } from './events.js';
 
 const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
 const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
+// Only a usage-limit banner in the live tail counts — quoted limit text in scrollback
+// (a conversation about limits) or a banner the session already scrolled past is not the
+// current state and must not drive a retry. Matches the overload path's tail discipline.
+const RATE_LIMIT_TAIL_LINES = 12;
 
 export function createMonitorState() {
   return {
@@ -95,7 +99,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   // Enter here confirms the highlighted default, which on some Claude Code versions
   // is "Upgrade your plan". Navigate to "Stop and wait for limit to reset" wherever
   // it sits, confirm it, then enter the normal (hours-scale) wait state.
-  if (tmuxAdapter.sendKey && isRateLimitOptionsPrompt(stripped)
+  if (tmuxAdapter.sendKey && isRateLimitOptionsPrompt(stripped, RATE_LIMIT_TAIL_LINES)
       && Date.now() >= (state._menuCooldownUntil || 0)) {
     const cooldown = config.pollIntervalSeconds * 1000 * 2;
 
@@ -109,7 +113,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       return 'skipped-not-claude';
     }
 
-    const steps = menuStepsToWaitOption(stripped);
+    const steps = menuStepsToWaitOption(stripped, RATE_LIMIT_TAIL_LINES);
     if (steps === null) {
       // Layout unreadable — refuse to press Enter (could confirm "Upgrade").
       state._menuCooldownUntil = Date.now() + cooldown;
@@ -136,9 +140,13 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     if (Date.now() < state.waitUntil) return 'waiting';
     if (!isAlive()) return 'exit';
 
-    // Always check if rate limit cleared FIRST — even when maxRetries
-    // exhausted, the user (or time passing) may have resolved it.
-    if (!isRateLimited(stripped, config.customPatterns)) {
+    // Stop driving the session if the limit cleared OR Claude has already resumed and
+    // is working again. Without the isWorking gate the usage path re-sends the retry
+    // message every poll (up to maxRetries) while the limit banner lingers in the
+    // captured scrollback after a successful resume — spamming an actively-working
+    // session (and a banner re-printed by another process keeps it "rate-limited" the
+    // whole time). isWorking ⇒ the session continued; never inject into it.
+    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || isWorking(stripped)) {
       state.status = 'monitoring'; state.attempts = 0;
       return 'user-continued';
     }
@@ -185,7 +193,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       // Self-recovery: Claude resumed during the backoff → don't interrupt it.
       if (isWorking(stripped)) { resetOverload(state); state.status = 'monitoring'; return 'overload-cleared'; }
       // A usage limit appearing mid-wait still takes precedence.
-      if (isRateLimited(stripped, config.customPatterns)) { resetOverload(state); return enterUsageWait(state, stripped, config); }
+      if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) { resetOverload(state); return enterUsageWait(state, stripped, config); }
 
       const foregroundOk = await checkForeground(tmuxAdapter, pane, config);
       if (!foregroundOk.ok) {
@@ -209,7 +217,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     const capMs = overload.maxTotalWaitMinutes * 60_000;
 
     // Usage-limit takes precedence: hand off to the (hours-scale) reset path.
-    if (isRateLimited(stripped, config.customPatterns)) {
+    if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
       resetOverload(state);
       return enterUsageWait(state, stripped, config);
     }
@@ -277,7 +285,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
 
   // --- monitoring ---
   // Usage-limit (hours-scale reset) takes precedence over overload (seconds-scale).
-  if (isRateLimited(stripped, config.customPatterns)) {
+  if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
     return enterUsageWait(state, stripped, config);
   }
 

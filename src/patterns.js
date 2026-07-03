@@ -189,6 +189,32 @@ export function detectOverload(text, patterns = []) {
   return overloadMatch(text, patterns) !== null;
 }
 
+// --- Safeguard / AUP false-positive detection ---
+// A distinct failure mode from usage limits and 5xx overloads: the model's safeguards
+// flag the message (often a false positive — the error itself says it "may flag safe,
+// normal content"). It renders like:
+//   ● API Error: Fable 5's safeguards flagged this message (…/legal/aup). … Claude Code
+//     can't respond to this request with Fable 5.
+//     Double press esc to edit your last message, or try a different model with /model.
+// Because the flag is semi-random, an immediate re-send frequently clears it — but it
+// must be capped so a *sticky* flag doesn't loop forever. Tail-anchored like the others.
+export function safeguardMatch(text, patterns = []) {
+  if (!patterns || patterns.length === 0) return null;
+  const lines = tail(text);
+  if (!lines.join('').trim()) return null;
+  const regexes = toRegexes(patterns);
+  for (const line of lines) {
+    for (const r of regexes) {
+      if (r.test(line)) return { pattern: r.source, line: line.trim().slice(0, 200) };
+    }
+  }
+  return null;
+}
+
+export function detectSafeguard(text, patterns = []) {
+  return safeguardMatch(text, patterns) !== null;
+}
+
 export function isWorking(text) {
   const lines = tail(text);
   return lines.some(line => WORKING_PATTERNS.some(p => p.test(line)));

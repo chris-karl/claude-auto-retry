@@ -22,9 +22,11 @@ export const EVENTS_DIR = join(homedir(), '.claude-auto-retry', 'events');
 // Routing it here made the monitor fire futile "Continue" retries into a session-limited
 // pane and fight the (correct) scraper usage-wait path. Session/usage limits are owned by
 // the scraper usage path (it reliably reads the persistent "…resets <time>" banner and
-// waits); a genuinely transient API 429 is still caught by the overload scraper's
-// "temporarily limiting requests" pattern. Permanent errors (auth/billing/invalid) never
-// retry.
+// waits); a genuinely transient API 429 is caught by the overload scraper's "temporarily
+// limiting requests" pattern — but only while the scraper is active (it is disabled once
+// eventMode latches), so API-key sessions in event mode currently get no retry for that
+// case. A known, accepted gap: rare, and strictly better than misrouting session limits.
+// Permanent errors (auth/billing/invalid) never retry.
 const RETRYABLE = new Set(['overloaded', 'server_error']);
 
 export function isRetryableError(errorType) {

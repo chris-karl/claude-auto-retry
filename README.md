@@ -241,8 +241,9 @@ repeats — but only up to `maxRetries` times, then **gives up loudly** (logged)
 than looping. A sticky flag means the content/model combination is genuinely blocked;
 switch models with `/model` or rephrase.
 
-Detection is tail-anchored (last 12 pane lines) like the overload path, so the phrase
-appearing in scrollback or in a conversation *about* safeguards won't trigger it.
+Detection is tail-anchored (last 12 pane lines) like the overload path, and a match
+additionally requires the `API Error` render line nearby — so the phrases appearing in
+scrollback or in a conversation *about* safeguards won't trigger it.
 
 Configured under a `safeguard` block (defaults shown):
 
@@ -261,7 +262,7 @@ Configured under a `safeguard` block (defaults shown):
 | Option | Default | Description |
 |--------|---------|-------------|
 | `enabled` | `true` | Turn the safeguard-retry path on/off |
-| `patterns` | (see above) | Case-insensitive regexes marking the safeguard render (matched in the pane tail) |
+| `patterns` | (see above) | Case-insensitive regexes marking the safeguard render (matched in the pane tail, near an `API Error` line) |
 | `maxRetries` | `3` | Re-send attempts before giving up — kept small; retrying a sticky flag won't help |
 | `retryDelaySeconds` | `8` | Wait between re-sends |
 | `retryMessage` | `"continue"` | Message sent to nudge past the flag |

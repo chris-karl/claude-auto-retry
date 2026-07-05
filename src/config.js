@@ -50,8 +50,10 @@ export const DEFAULT_OVERLOAD = {
 // loop forever. See README "Safeguard retry".
 export const DEFAULT_SAFEGUARD = {
   enabled: true,
-  // Anchored, case-insensitive regexes matched against the pane tail (see detectSafeguard).
-  // Match the stable phrases of the safeguard render, not the model name (which varies).
+  // Case-insensitive regexes matched against the pane tail; a match only counts with an
+  // `API Error` line nearby (see safeguardMatch) so quoting/discussing these phrases in
+  // conversation can't trigger a retry. Match the stable phrases of the render, not the
+  // model name (which varies).
   patterns: [
     "safeguards flagged this message",
     "can't respond to this request with",   // "Claude Code can't respond to this request with <model>"

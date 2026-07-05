@@ -198,14 +198,23 @@ export function detectOverload(text, patterns = []) {
 //     Double press esc to edit your last message, or try a different model with /model.
 // Because the flag is semi-random, an immediate re-send frequently clears it — but it
 // must be capped so a *sticky* flag doesn't loop forever. Tail-anchored like the others.
+// Anchor: a REAL flag always renders as an `API Error:` line. Requiring it nearby (same
+// wrap-tolerant window isRateLimited uses for limit/resets pairing) keeps the phrases
+// from firing on ordinary conversation — Claude quoting the AUP link or discussing
+// safeguard errors at an idle prompt must not trigger a retry. (DEFAULT_OVERLOAD learned
+// this the hard way; see its comment about bare status numbers.)
+const SAFEGUARD_ANCHOR = [/\bAPI Error\b/i];
+
 export function safeguardMatch(text, patterns = []) {
   if (!patterns || patterns.length === 0) return null;
   const lines = tail(text);
   if (!lines.join('').trim()) return null;
   const regexes = toRegexes(patterns);
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
     for (const r of regexes) {
-      if (r.test(line)) return { pattern: r.source, line: line.trim().slice(0, 200) };
+      if (r.test(lines[i]) && hasNearbyMatch(lines, i, SAFEGUARD_ANCHOR)) {
+        return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
+      }
     }
   }
   return null;

@@ -54,6 +54,7 @@ function resetOverload(state) {
 function resetSafeguard(state) {
   state.safeguardAttempts = 0;
   state.safeguardWaitUntil = 0;
+  state._safeguardGaveUp = false;
 }
 
 // Foreground safety: is claude/node the foreground process (safe to send-keys), or did
@@ -299,7 +300,15 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
       resetSafeguard(state); return enterUsageWait(state, stripped, config);
     }
-    if (isWorking(stripped)) { resetSafeguard(state); state.status = 'monitoring'; return 'safeguard-cleared'; }
+    // In flight (our retry, or the user typing continued things). Defer WITHOUT consuming
+    // or resetting — a tick landing mid-retry must not zero the counter, or a sticky flag
+    // re-enters with a fresh budget and the maxRetries bound never trips (verified: it
+    // retried indefinitely). Mirrors the overload branch. Recovery is decided at the next
+    // idle tick: flag gone -> cleared; flag still there -> the count stands.
+    if (isWorking(stripped)) {
+      state.safeguardWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'safeguard-working';
+    }
 
     // Flag gone → recovered.
     if (!detectSafeguard(stripped, safeguard.patterns)) {
@@ -310,6 +319,10 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // the stale error every tick.
     if (state.safeguardAttempts >= safeguard.maxRetries) {
       state.safeguardWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      // Give up LOUDLY — once. Subsequent holds are silent or the warn re-logs ~1/min
+      // for as long as the sticky banner sits at the prompt.
+      if (state._safeguardGaveUp) return 'safeguard-holding';
+      state._safeguardGaveUp = true;
       return 'safeguard-gave-up';
     }
 

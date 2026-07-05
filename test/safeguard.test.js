@@ -34,10 +34,25 @@ const FLAG = [
 
 describe('detectSafeguard', () => {
   it('matches the safeguards-flagged render', () => assert.equal(detectSafeguard(FLAG, PATS), true));
-  it('matches the "can\'t respond to this request with" phrasing', () =>
-    assert.equal(detectSafeguard("Claude Code can't respond to this request with Opus 4.8.", PATS), true));
-  it('matches the AUP link', () => assert.equal(detectSafeguard('see https://www.anthropic.com/legal/aup', PATS), true));
-  it('is case-insensitive', () => assert.equal(detectSafeguard('SAFEGUARDS FLAGGED THIS MESSAGE', PATS), true));
+  it('matches the "can\'t respond to this request with" phrasing next to the API Error line', () =>
+    assert.equal(detectSafeguard([
+      "● API Error: Fable 5's safeguards flagged this message",
+      "  (https://www.anthropic.com/legal/aup). Claude Code can't respond to this request with Fable 5.",
+    ].join('\n'), PATS), true));
+  it('matches a wrapped render (phrase on a different physical line than "API Error")', () =>
+    assert.equal(detectSafeguard([
+      '● API Error: Fable',
+      "  5's safeguards flagged",
+      '  this message (https://www.anthropic.com/legal/aup).',
+    ].join('\n'), PATS), true));
+  it('is case-insensitive', () =>
+    assert.equal(detectSafeguard('API ERROR: SAFEGUARDS FLAGGED THIS MESSAGE', PATS), true));
+  it('does NOT fire on the phrases without the API Error render nearby (anti false-positive anchor)', () => {
+    // Regression: Claude ANSWERING a question about AUP flags must not trigger a retry.
+    assert.equal(detectSafeguard('see https://www.anthropic.com/legal/aup for the policy', PATS), false);
+    assert.equal(detectSafeguard("Claude Code can't respond to this request with Opus 4.8.", PATS), false);
+    assert.equal(detectSafeguard('they said safeguards flagged this message yesterday', PATS), false);
+  });
   it('returns false for normal output', () => assert.equal(detectSafeguard('Here is the refactor you asked for.', PATS), false));
   it('returns false for empty patterns/text', () => {
     assert.equal(detectSafeguard(FLAG, []), false);
@@ -129,11 +144,64 @@ describe('processOneTick — safeguard path', () => {
     assert.equal(s.safeguardAttempts, 0);
   });
 
-  it('clears if Claude has resumed working', async () => {
+  it('defers while Claude is working — WITHOUT resetting the attempt counter', async () => {
+    // Regression: a tick landing while the retried request is in flight used to reset
+    // safeguardAttempts to 0 via the clear path, so a sticky flag re-entered with a fresh
+    // budget every cycle and the maxRetries bound never tripped (observed: 10+ sends with
+    // maxRetries=3). Mirror the overload branch: defer without consuming or resetting.
     const t = mockTmux(FLAG + '\n✻ Thinking… (esc to interrupt)');
     const s = createMonitorState();
-    s.status = 'safeguard'; s.safeguardWaitUntil = Date.now() - 1;
-    assert.equal(await processOneTick(s, t, '%0', cfg(), () => true), 'safeguard-cleared');
+    s.status = 'safeguard'; s.safeguardWaitUntil = Date.now() - 1; s.safeguardAttempts = 2;
+    assert.equal(await processOneTick(s, t, '%0', cfg(), () => true), 'safeguard-working');
+    assert.equal(s.safeguardAttempts, 2);   // NOT reset
+    assert.equal(s.status, 'safeguard');    // still owns the flag
+    assert.equal(t._sent.length, 0);
+  });
+
+  it('stays BOUNDED even when working ticks interleave between retries (sticky flag)', async () => {
+    const c = cfg({ maxRetries: 2, retryDelaySeconds: 1 });
+    const flagged = mockTmux(FLAG);
+    const s = createMonitorState();
+    await processOneTick(s, flagged, '%0', c, () => true);            // detect
+    let sent = 0;
+    for (let i = 0; i < 10; i++) {
+      // alternate: retry tick at idle-with-flag, then a mid-flight (working) tick
+      s.safeguardWaitUntil = Date.now() - 1;
+      const idle = mockTmux(FLAG);
+      const r1 = await processOneTick(s, idle, '%0', c, () => true);
+      sent += idle._sent.length;
+      s.safeguardWaitUntil = Date.now() - 1;
+      const working = mockTmux(FLAG + '\n✻ Thinking… (esc to interrupt)');
+      await processOneTick(s, working, '%0', c, () => true);
+      sent += working._sent.length;
+      if (r1 === 'safeguard-gave-up' || r1 === 'safeguard-holding') break;
+    }
+    assert.equal(sent, 2);                  // exactly maxRetries sends, ever
+    assert.equal(s.safeguardAttempts, 2);
+  });
+
+  it('gives up loudly ONCE, then holds quietly', async () => {
+    const c = cfg({ maxRetries: 1 });
+    const t = mockTmux(FLAG);
+    const s = createMonitorState();
+    s.status = 'safeguard'; s.safeguardWaitUntil = Date.now() - 1; s.safeguardAttempts = 1;
+    assert.equal(await processOneTick(s, t, '%0', c, () => true), 'safeguard-gave-up');
+    s.safeguardWaitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(s, t, '%0', c, () => true), 'safeguard-holding');
+    assert.equal(t._sent.length, 0);
+  });
+
+  it('does not inject into a healthy session whose reply mentions the AUP link at an idle prompt', async () => {
+    // Regression: unanchored patterns fired on Claude ANSWERING a question about AUP flags.
+    const pane = [
+      '● The safeguard error you saw means the model flagged the message. See',
+      '  https://www.anthropic.com/legal/aup for the policy. It can be a false positive.',
+      '',
+      '❯ ',
+    ].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', cfg(), () => true), 'monitoring');
     assert.equal(t._sent.length, 0);
   });
 

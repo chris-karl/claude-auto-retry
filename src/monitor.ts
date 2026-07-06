@@ -1,4 +1,4 @@
-import { isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isWorking, overloadMatch, detectOverload } from './patterns.ts';
+import { isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isWorking, overloadMatch, detectOverload, safeguardMatch, detectSafeguard } from './patterns.ts';
 import type { PatternMatch } from './patterns.ts';
 import { parseResetTime, calculateWaitMs } from './time-parser.ts';
 import { isRetryableError } from './events.ts';
@@ -24,7 +24,7 @@ const MENU_DISMISS_SETTLE_MS = 250;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export interface MonitorState {
-  status: 'monitoring' | 'waiting' | 'overload';
+  status: 'monitoring' | 'waiting' | 'overload' | 'safeguard';
   waitUntil: number;
   attempts: number;
   lastRateLimitMessage: string | null;
@@ -40,6 +40,11 @@ export interface MonitorState {
   eventMode: boolean;
   viaEvent: boolean;
   lastIgnoredEventError: string | null;
+  // Safeguard/AUP false-positive retry sub-state (bounded, seconds-scale).
+  safeguardAttempts: number;
+  safeguardWaitUntil: number;
+  safeguardGaveUp: boolean;
+  lastSafeguardMatch: PatternMatch | null;
 }
 
 // Adapter over the PTY-hosted terminal the monitor drives. readEvent/clearEvent are
@@ -56,13 +61,16 @@ export type TickResult =
   | 'exit' | 'monitoring' | 'waiting' | 'retried' | 'retry-failed'
   | 'retry-succeeded' | 'user-continued' | 'max-retries'
   | 'overload-detected' | 'overload-waiting' | 'overload-working' | 'overload-retried'
-  | 'overload-retry-failed' | 'overload-cleared' | 'overload-gave-up' | 'event-ignored';
+  | 'overload-retry-failed' | 'overload-cleared' | 'overload-gave-up' | 'event-ignored'
+  | 'safeguard-detected' | 'safeguard-waiting' | 'safeguard-working' | 'safeguard-retried'
+  | 'safeguard-retry-failed' | 'safeguard-cleared' | 'safeguard-gave-up' | 'safeguard-holding';
 
 export function createMonitorState(): MonitorState {
   return {
     status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null, retrySent: false,
     overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0, lastOverloadMatch: null,
     eventMode: false, viaEvent: false, lastIgnoredEventError: null,
+    safeguardAttempts: 0, safeguardWaitUntil: 0, safeguardGaveUp: false, lastSafeguardMatch: null,
   };
 }
 
@@ -89,6 +97,12 @@ function resetOverload(state: MonitorState): void {
   state.overloadTotalWaitMs = 0;
   state.overloadWaitUntil = 0;
   state.viaEvent = false;
+}
+
+function resetSafeguard(state: MonitorState): void {
+  state.safeguardAttempts = 0;
+  state.safeguardWaitUntil = 0;
+  state.safeguardGaveUp = false;
 }
 
 // Shared entry into the (hours-scale) usage-reset wait, from plain monitoring or
@@ -260,6 +274,57 @@ export async function processOneTick(
     return 'overload-retried';
   }
 
+  if (state.status === 'safeguard') {
+    if (Date.now() < state.safeguardWaitUntil) return 'safeguard-waiting';
+    if (!isAlive()) return 'exit';
+    const safeguard = config.safeguard;
+
+    // A usage limit appearing takes precedence.
+    if (limited && (menuUp || !busy)) {
+      resetSafeguard(state);
+      state.status = 'monitoring';
+      return enterUsageWait(state, screenText, config);
+    }
+    // In flight (our retry, or the user typing continued things). Defer WITHOUT
+    // consuming or resetting — a tick landing mid-retry must not zero the counter, or
+    // a sticky flag re-enters with a fresh budget and the maxRetries bound never trips
+    // (upstream verified: it retried indefinitely). Mirrors the overload branch.
+    // Recovery is decided at the next idle tick: flag gone -> cleared; flag still
+    // there -> the count stands.
+    if (busy) {
+      state.safeguardWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'safeguard-working';
+    }
+
+    // Flag gone → recovered.
+    if (!detectSafeguard(screenText, safeguard.patterns)) {
+      resetSafeguard(state);
+      state.status = 'monitoring';
+      return 'safeguard-cleared';
+    }
+
+    // Sticky flag: give up loudly rather than loop. Long cooldown so we don't
+    // re-detect the stale error every tick.
+    if (state.safeguardAttempts >= safeguard.maxRetries) {
+      state.safeguardWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * MAX_RETRIES_BACKOFF_INTERVALS);
+      // Give up LOUDLY — once. Subsequent holds are silent for as long as the sticky
+      // banner sits at the prompt.
+      if (state.safeguardGaveUp) return 'safeguard-holding';
+      state.safeguardGaveUp = true;
+      return 'safeguard-gave-up';
+    }
+
+    // Increment + schedule BEFORE send so a send failure still consumes the slot.
+    state.safeguardAttempts++;
+    state.safeguardWaitUntil = Date.now() + (safeguard.retryDelaySeconds * 1000);
+    try {
+      await screen.send(safeguard.retryMessage);
+    } catch {
+      return 'safeguard-retry-failed';
+    }
+    return 'safeguard-retried';
+  }
+
   // --- monitoring ---
   // Enter waiting on a fresh limit — but ignore a banner merely lingering while
   // Claude is actively working (unless the menu is blocking input). Usage limits
@@ -309,6 +374,20 @@ export async function processOneTick(
     if (match) {
       state.lastOverloadMatch = match;  // surfaced in the 'overload-detected' log line
       return enterOverload(state, config.overload, rand);
+    }
+  }
+
+  // Safeguard/AUP false-positive: enter a bounded, seconds-scale retry loop.
+  // Independent of the overload path (different render, different recovery). Only
+  // when Claude is idle.
+  if (config.safeguard.enabled && !busy) {
+    const match = safeguardMatch(screenText, config.safeguard.patterns);
+    if (match) {
+      resetSafeguard(state);
+      state.status = 'safeguard';
+      state.safeguardWaitUntil = Date.now() + (config.safeguard.retryDelaySeconds * 1000);
+      state.lastSafeguardMatch = match;
+      return 'safeguard-detected';
     }
   }
 
@@ -379,6 +458,14 @@ export function runMonitor(
         log('warn', `Overload backoff cap reached (maxTotalWaitMinutes=${config.overload.maxTotalWaitMinutes}). Giving up — endpoint may be genuinely down (check status.claude.com). Will not retry until the error clears.`);
       }
       if (result === 'event-ignored') log('warn', `Ignored StopFailure marker with non-retryable error="${state.lastIgnoredEventError}". If this is "rate_limit", an outdated hook is installed — re-run "claude-auto-retry install-hook".`);
+      if (result === 'safeguard-detected') {
+        const m = state.lastSafeguardMatch;
+        log('warn', `Safeguard/AUP flag detected${m ? ` [matched /${m.pattern}/ in: "${m.line}"]` : ''} — often a false positive. Will retry up to ${config.safeguard.maxRetries}x every ${config.safeguard.retryDelaySeconds}s.`);
+      }
+      if (result === 'safeguard-retried') log('info', `Safeguard retry sent (attempt ${state.safeguardAttempts}/${config.safeguard.maxRetries}).`);
+      if (result === 'safeguard-retry-failed') log('warn', `Safeguard retry send failed (attempt ${state.safeguardAttempts}/${config.safeguard.maxRetries}); will retry after the delay.`);
+      if (result === 'safeguard-cleared') log('info', 'Safeguard flag cleared. Resuming normal monitoring.');
+      if (result === 'safeguard-gave-up') log('warn', `Safeguard flag persisted after ${config.safeguard.maxRetries} retries. Giving up — the flag is likely sticky for this content/model; try /model to switch models or rephrase. Will not retry until it clears.`);
     } catch (err) {
       consecutiveErrors++;
       log('error', `Monitor tick error: ${(err as Error).message}`);

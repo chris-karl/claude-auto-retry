@@ -1,13 +1,14 @@
-import { describe, it, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLogger } from '../src/logger.ts';
-import { readFile, rm } from 'node:fs/promises';
+import { readFile, rm, mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 describe('createLogger', () => {
-  const testDir = join(tmpdir(), `car-logger-test-${Date.now()}`);
+  let testDir: string;
 
+  beforeEach(async () => { testDir = await mkdtemp(join(tmpdir(), 'car-logger-test-')); });
   afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
 
   it('creates log directory and writes log entry', async () => {

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, unlink } from 'node:fs/promises';
+import { writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { detectSafeguard, safeguardMatch } from '../src/patterns.ts';
@@ -84,9 +84,10 @@ describe('detectSafeguard', () => {
 
 describe('safeguard config validation', () => {
   async function loadFrom(obj: unknown): Promise<Config> {
-    const f = join(tmpdir(), `car-sg-${Date.now()}-${Math.round(Math.random() * 1e6)}.json`);
+    const dir = await mkdtemp(join(tmpdir(), 'car-sg-'));
+    const f = join(dir, 'config.json');
     await writeFile(f, JSON.stringify(obj));
-    try { return await loadConfig(f); } finally { await unlink(f); }
+    try { return await loadConfig(f); } finally { await rm(dir, { recursive: true, force: true }); }
   }
   it('is present on DEFAULT_CONFIG with a small retry cap', () => {
     assert.equal(DEFAULT_CONFIG.safeguard.enabled, true);

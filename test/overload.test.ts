@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, unlink } from 'node:fs/promises';
+import { writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { detectOverload, overloadMatch } from '../src/patterns.ts';
@@ -116,9 +116,10 @@ describe('DEFAULT_OVERLOAD config', () => {
 });
 
 async function loadFrom(obj: unknown): Promise<Config> {
-  const f = join(tmpdir(), `car-ovl-${Date.now()}-${Math.round(Math.random() * 1e6)}.json`);
+  const dir = await mkdtemp(join(tmpdir(), 'car-ovl-'));
+  const f = join(dir, 'config.json');
   await writeFile(f, JSON.stringify(obj));
-  try { return await loadConfig(f); } finally { await unlink(f); }
+  try { return await loadConfig(f); } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
 describe('overload config validation', () => {

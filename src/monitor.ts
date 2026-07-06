@@ -1,6 +1,8 @@
 import { isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isWorking, overloadMatch, detectOverload } from './patterns.ts';
 import type { PatternMatch } from './patterns.ts';
 import { parseResetTime, calculateWaitMs } from './time-parser.ts';
+import { isRetryableError } from './events.ts';
+import type { StopFailureEvent } from './events.ts';
 import type { Config, OverloadConfig } from './config.ts';
 import type { Logger } from './logger.ts';
 
@@ -32,25 +34,35 @@ export interface MonitorState {
   overloadTotalWaitMs: number;
   overloadWaitUntil: number;
   lastOverloadMatch: PatternMatch | null;
+  // Event-driven overload: eventMode latches true once a StopFailure marker is ever
+  // seen (proves the hook is live → stop trusting the scraper). viaEvent marks the
+  // current backoff window as event-triggered (edge: one send per failure).
+  eventMode: boolean;
+  viaEvent: boolean;
+  lastIgnoredEventError: string | null;
 }
 
-// Adapter over the PTY-hosted terminal the monitor drives.
+// Adapter over the PTY-hosted terminal the monitor drives. readEvent/clearEvent are
+// optional plumbing for the StopFailure event channel (absent in --print mode/tests).
 export interface ScreenAdapter {
   capture: (lines: number) => Promise<string>;   // rendered screen text (last N rows)
   send: (text: string) => Promise<void>;          // type text + Enter into the PTY
   sendEscape: () => Promise<void>;                // press Escape (dismiss the limit menu)
+  readEvent?: () => Promise<StopFailureEvent | null>;  // fresh StopFailure marker, if any
+  clearEvent?: () => Promise<void>;                    // consume the marker
 }
 
 export type TickResult =
   | 'exit' | 'monitoring' | 'waiting' | 'retried' | 'retry-failed'
   | 'retry-succeeded' | 'user-continued' | 'max-retries'
   | 'overload-detected' | 'overload-waiting' | 'overload-working' | 'overload-retried'
-  | 'overload-retry-failed' | 'overload-cleared' | 'overload-gave-up';
+  | 'overload-retry-failed' | 'overload-cleared' | 'overload-gave-up' | 'event-ignored';
 
 export function createMonitorState(): MonitorState {
   return {
     status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null, retrySent: false,
     overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0, lastOverloadMatch: null,
+    eventMode: false, viaEvent: false, lastIgnoredEventError: null,
   };
 }
 
@@ -76,6 +88,7 @@ function resetOverload(state: MonitorState): void {
   state.overloadAttempts = 0;
   state.overloadTotalWaitMs = 0;
   state.overloadWaitUntil = 0;
+  state.viaEvent = false;
 }
 
 // Shared entry into the (hours-scale) usage-reset wait, from plain monitoring or
@@ -185,6 +198,26 @@ export async function processOneTick(
     const overload = config.overload;
     const capMs = overload.maxTotalWaitMinutes * 60_000;
 
+    // Event-triggered window: a StopFailure marker put us here. Edge-triggered — send
+    // exactly once per failure, then return to monitoring to await the next marker. We
+    // do NOT re-check the scraper for "still overloaded" (the marker was authoritative).
+    if (state.viaEvent) {
+      // Self-recovery: Claude resumed during the backoff → don't interrupt it.
+      if (busy) { resetOverload(state); state.status = 'monitoring'; return 'overload-cleared'; }
+      // A usage limit appearing mid-wait still takes precedence.
+      if (limited) { resetOverload(state); return enterUsageWait(state, screenText, config); }
+
+      state.overloadAttempts++;          // next failure backs off further
+      state.viaEvent = false;
+      state.status = 'monitoring';
+      try {
+        await screen.send(overload.retryMessage);
+      } catch {
+        return 'overload-retry-failed';
+      }
+      return 'overload-retried';
+    }
+
     // Usage-limit takes precedence: hand off to the (hours-scale) reset path.
     if (limited && (menuUp || !busy)) {
       resetOverload(state);
@@ -235,9 +268,43 @@ export async function processOneTick(
     return enterUsageWait(state, screenText, config);
   }
 
-  // Sustained-overload scraper: only when Claude is idle (a terminal error is the
-  // last thing on screen, never mid-flight).
-  if (config.overload.enabled && !busy) {
+  // Event-driven overload (authoritative; see DESIGN-NOTES §1). A StopFailure marker
+  // for this session means the turn ended in a retryable API error — no scraping, no
+  // ambiguity. Latches eventMode so the scraper path is disabled once we know the
+  // hook is live.
+  if (config.overload.enabled && screen.readEvent) {
+    const ev = await screen.readEvent();
+    if (ev) {
+      // Consume-side guard: trust no writer. The hook entry in settings.json freezes
+      // the cli path + matcher at install time, so an OLDER hook binary (whose matcher
+      // and RETRYABLE set still include rate_limit) can keep writing markers after an
+      // upgrade. Consume-and-ignore anything non-retryable, and do NOT latch eventMode
+      // off it — a misclassified marker must not start a backoff nor disable the
+      // scraper path.
+      if (!isRetryableError(ev.error)) {
+        await screen.clearEvent?.();               // consume so it can't re-fire
+        state.lastIgnoredEventError = ev.error;
+        return 'event-ignored';
+      }
+      state.eventMode = true;
+      await screen.clearEvent?.();                 // consume
+      if (busy) { resetOverload(state); return 'overload-cleared'; } // self-recovered
+      const capMs = config.overload.maxTotalWaitMinutes * 60_000;
+      if (state.overloadTotalWaitMs >= capMs) return 'overload-gave-up';
+      const w = nextOverloadWaitMs(state.overloadAttempts, config.overload, rand);
+      state.overloadTotalWaitMs += w;
+      state.overloadWaitUntil = Date.now() + w;
+      state.status = 'overload';
+      state.viaEvent = true;
+      state.lastOverloadMatch = { pattern: 'StopFailure', line: `error=${ev.error}` };
+      return 'overload-detected';
+    }
+  }
+
+  // Sustained-overload scraper: only while eventMode hasn't latched (hook absent or
+  // not yet fired), and only when Claude is idle (a terminal error is the last thing
+  // on screen, never mid-flight).
+  if (!state.eventMode && config.overload.enabled && !busy) {
     const match = overloadMatch(screenText, config.overload.patterns);
     if (match) {
       state.lastOverloadMatch = match;  // surfaced in the 'overload-detected' log line
@@ -311,6 +378,7 @@ export function runMonitor(
         overloadGaveUpLogged = true;
         log('warn', `Overload backoff cap reached (maxTotalWaitMinutes=${config.overload.maxTotalWaitMinutes}). Giving up — endpoint may be genuinely down (check status.claude.com). Will not retry until the error clears.`);
       }
+      if (result === 'event-ignored') log('warn', `Ignored StopFailure marker with non-retryable error="${state.lastIgnoredEventError}". If this is "rate_limit", an outdated hook is installed — re-run "claude-auto-retry install-hook".`);
     } catch (err) {
       consecutiveErrors++;
       log('error', `Monitor tick error: ${(err as Error).message}`);

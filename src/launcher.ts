@@ -5,6 +5,7 @@ import { loadConfig } from './config.ts';
 import { createLogger } from './logger.ts';
 import { runMonitor } from './monitor.ts';
 import type { ScreenAdapter } from './monitor.ts';
+import { readStopFailureEvent, clearStopFailureEvent } from './events.ts';
 import {
   spawnPty,
   createTerminal,
@@ -62,13 +63,17 @@ async function launchInteractive(args: string[]): Promise<number> {
 
   const { cols, rows } = termSize();
 
+  // Session key for the StopFailure event channel: stamped onto claude's env so the
+  // hook (a child of claude) inherits it and writes a marker the monitor can read.
+  const sessionKey = String(process.pid);
+
   let term, child;
   try {
     term = await createTerminal(cols, rows);
     child = await spawnPty(claudeBin, args, {
       cols, rows,
       cwd: process.cwd(),
-      env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1' },
+      env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1', CLAUDE_AUTO_RETRY_SESSION: sessionKey },
     });
   } catch (err) {
     process.stderr.write(`[claude-auto-retry] Failed to start PTY: ${(err as Error).message}\n`);
@@ -153,6 +158,10 @@ async function launchInteractive(args: string[]): Promise<number> {
     // submit the retry (the menu's highlighted option varies, so a bare Enter
     // could confirm "Upgrade your plan").
     sendEscape: async () => { child.write('\x1b'); },
+    // StopFailure event channel (see src/events.ts): fresh markers written by the
+    // hook for this session, consumed by the monitor's event-driven overload path.
+    readEvent: () => readStopFailureEvent(sessionKey, config.overload.eventMaxAgeSeconds * 1000),
+    clearEvent: () => clearStopFailureEvent(sessionKey),
   };
 
   const stopMonitor = runMonitor(screen, config, logger, isAlive);
@@ -164,6 +173,8 @@ async function launchInteractive(args: string[]): Promise<number> {
       stopMonitor();
       if (signalFallback) { clearTimeout(signalFallback); signalFallback = null; }
       restoreTerminal();
+      // Best-effort marker cleanup so a recycled PID can't replay this session's failure.
+      clearStopFailureEvent(sessionKey).catch(() => {});
       logger.info('Claude exited. Monitor shutting down.').catch(() => {});
       resolve(toExitCode(exitCode, signal));
     });

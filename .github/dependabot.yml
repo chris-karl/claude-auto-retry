@@ -20,6 +20,9 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    commit-message:
+      # Empty prefix disables the auto-detected "chore(deps): " style
+      prefix: ""
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -28,3 +31,6 @@ updates:
       # Every second Monday of a month at 5:30
       cronjob: "30 5 * * MON#2"
       timezone: "Europe/Berlin"
+    commit-message:
+      # Empty prefix disables the auto-detected "chore(deps): " style
+      prefix: ""

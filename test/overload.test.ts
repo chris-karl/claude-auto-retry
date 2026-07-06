@@ -11,26 +11,40 @@ import {
   overloadBaseWaitMs, applyJitter, nextOverloadWaitMs,
 } from '../src/monitor.ts';
 import type { ScreenAdapter } from '../src/monitor.ts';
+import type { StopFailureEvent } from '../src/events.ts';
 
 const PATS = DEFAULT_OVERLOAD.patterns;
 
 interface MockScreen extends ScreenAdapter {
   _sent: string[];
   _escaped: number;
+  _event: StopFailureEvent | null;
+  _cleared: boolean;
 }
 
-function mockScreen(screenContent = '', { failSend = false }: { failSend?: boolean } = {}): MockScreen {
+function mockScreen(
+  screenContent = '',
+  { failSend = false, event = null }: { failSend?: boolean; event?: StopFailureEvent | null } = {},
+): MockScreen {
   const s: MockScreen = {
     _sent: [],
     _escaped: 0,
+    _event: event,
+    _cleared: false,
     capture: async () => screenContent,
     send: async (text: string) => {
       if (failSend) throw new Error('PTY destroyed');
       s._sent.push(text);
     },
     sendEscape: async () => { s._escaped++; },
+    readEvent: async () => s._event,
+    clearEvent: async () => { s._event = null; s._cleared = true; },
   };
   return s;
+}
+
+function makeEvent(error: string): StopFailureEvent {
+  return { session: '12345', error, session_id: null, ts: Date.now() };
 }
 
 // Deterministic config: zero jitter so scheduled waits are exact.
@@ -297,5 +311,92 @@ describe('processOneTick — overload path', () => {
     const st = createMonitorState();
     assert.equal(await processOneTick(st, s, cfg({ enabled: false }), () => true, NO_JITTER), 'monitoring');
     assert.equal(s._sent.length, 0);
+  });
+});
+
+describe('processOneTick — StopFailure event path (authoritative)', () => {
+  it('enters overload from a StopFailure marker with NO scraper match', async () => {
+    const s = mockScreen('working on a /health endpoint res.status(503)', { event: makeEvent('overloaded') });
+    const st = createMonitorState();
+    const r = await processOneTick(st, s, cfg(), () => true, NO_JITTER);
+    assert.equal(r, 'overload-detected');
+    assert.equal(st.eventMode, true);    // latched
+    assert.equal(st.viaEvent, true);
+    assert.equal(s._cleared, true);      // marker consumed
+    assert.equal(s._sent.length, 0);     // no send yet — backoff first
+    assert.ok(near(st.overloadWaitUntil - Date.now(), 30_000));
+  });
+
+  it('sends exactly once after the window, then returns to monitoring (edge-triggered)', async () => {
+    const s = mockScreen('idle prompt');
+    const st = createMonitorState();
+    st.status = 'overload'; st.viaEvent = true; st.overloadWaitUntil = Date.now() - 1; st.overloadTotalWaitMs = 30_000;
+    const r = await processOneTick(st, s, cfg(), () => true, NO_JITTER);
+    assert.equal(r, 'overload-retried');
+    assert.equal(s._sent[0], DEFAULT_OVERLOAD.retryMessage);
+    assert.equal(st.status, 'monitoring');   // back to waiting for the next failure
+    assert.equal(st.viaEvent, false);
+    assert.equal(st.overloadAttempts, 1);
+  });
+
+  it('cancels the send if Claude self-recovered during the backoff', async () => {
+    const s = mockScreen('Thinking… (esc to interrupt)');
+    const st = createMonitorState();
+    st.status = 'overload'; st.viaEvent = true; st.overloadWaitUntil = Date.now() - 1; st.overloadTotalWaitMs = 30_000;
+    assert.equal(await processOneTick(st, s, cfg(), () => true, NO_JITTER), 'overload-cleared');
+    assert.equal(s._sent.length, 0);
+    assert.equal(st.status, 'monitoring');
+  });
+
+  it('hands off to the usage path if a limit banner is up when the event window expires', async () => {
+    const s = mockScreen("You've hit your session limit · resets 3pm (UTC)");
+    const st = createMonitorState();
+    st.status = 'overload'; st.viaEvent = true; st.overloadWaitUntil = Date.now() - 1; st.overloadTotalWaitMs = 30_000;
+    assert.equal(await processOneTick(st, s, cfg(), () => true, NO_JITTER), 'waiting');
+    assert.equal(st.status, 'waiting');
+    assert.equal(s._sent.length, 0);
+  });
+
+  it('treats an event as self-recovered if Claude is already working at detection', async () => {
+    const s = mockScreen('Cogitating… (esc to interrupt)', { event: makeEvent('overloaded') });
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, s, cfg(), () => true, NO_JITTER), 'overload-cleared');
+    assert.equal(s._cleared, true);
+    assert.equal(st.status, 'monitoring');
+    assert.equal(s._sent.length, 0);
+  });
+
+  it('consumes-and-ignores a non-retryable marker (e.g. rate_limit from an outdated hook) without latching eventMode', async () => {
+    // Regression (upstream #31): settings.json freezes the hook's cli path + matcher at
+    // install time, so an old hook binary can still write rate_limit markers after an
+    // upgrade. The monitor must not enter overload backoff off it, and must NOT latch
+    // eventMode (that would disable the scraper path off a misclassified event).
+    for (const bad of ['rate_limit', 'billing_error', 'invalid_request']) {
+      const s = mockScreen('idle prompt', { event: makeEvent(bad) });
+      const st = createMonitorState();
+      const r = await processOneTick(st, s, cfg(), () => true, NO_JITTER);
+      assert.equal(r, 'event-ignored', bad);
+      assert.equal(st.eventMode, false, bad);   // NOT latched
+      assert.equal(st.status, 'monitoring', bad);
+      assert.equal(s._cleared, true, bad);      // consumed so it can't re-fire
+      assert.equal(s._sent.length, 0, bad);
+    }
+  });
+
+  it('once eventMode is latched, the scraper path is disabled', async () => {
+    const s = mockScreen('API Error: 529 Overloaded');  // scraper WOULD match
+    const st = createMonitorState();
+    st.eventMode = true;
+    assert.equal(await processOneTick(st, s, cfg(), () => true, NO_JITTER), 'monitoring');
+    assert.equal(s._sent.length, 0);
+  });
+
+  it('works without event plumbing (adapter without readEvent falls back to the scraper)', async () => {
+    const s = mockScreen('API Error: 529 Overloaded');
+    delete s.readEvent;
+    delete s.clearEvent;
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, s, cfg(), () => true, NO_JITTER), 'overload-detected');
+    assert.equal(st.status, 'overload');
   });
 });

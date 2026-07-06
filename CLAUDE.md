@@ -70,15 +70,14 @@ Steps once squash consent is given:
 
 ## Repository context
 
-This repo is a public fork of `cheapestinference/claude-auto-retry`, and its two
-remotes have distinct roles:
+This repo is a fork of `cheapestinference/claude-auto-retry`.
 
-- **`origin`** (`git@github.com:chris-karl/claude-auto-retry.git`) — our public fork and
-  the **main working remote**. All branches, commits, and pushes go here. The mainline
-  branch is **`master`** (the fork's default branch, matching upstream) — wherever this
-  file says `main`, read `master`.
-- **`old`** (`git@github.com:chris-karl/claude-auto-retry-old.git`) — the pre-public
-  repo this work started in, kept as an archive of that history. Treat it as
-  **read-only: never push to `old`.**
-- Upstream (`github.com/cheapestinference/claude-auto-retry`) is not configured as a
-  remote; add it temporarily if upstream updates should be pulled in.
+- **`origin`** (`git@github.com:chris-karl/claude-auto-retry.git`) — our own fork and the
+  primary working remote. All branches, commits, and pushes go here, and `main` tracks
+  `origin/main`.
+- **`upstream`** (`git@github.com:cheapestinference/claude-auto-retry.git`) — the
+  original project. Use it only to fetch upstream updates (e.g. `git fetch upstream`);
+  never push to it. No local branch tracks upstream. Even when an upstream repo also has
+  a branch named `main`, an unqualified `main` always means the fork's branch; refer to
+  upstream branches explicitly as `upstream/<branch>` (this upstream's default branch is
+  `master`, i.e. `upstream/master`).

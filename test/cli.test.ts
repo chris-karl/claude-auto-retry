@@ -1,6 +1,7 @@
-import { describe, it, afterEach } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, readFile, unlink } from 'node:fs/promises';
+import { writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -34,8 +35,9 @@ describe('cli dispatch', () => {
 });
 
 describe('injectWrapper', () => {
-  const testFile = join(tmpdir(), `car-rc-test-${Date.now()}`);
-  afterEach(async () => { try { await unlink(testFile); } catch { /* already gone */ } });
+  const dir = mkdtempSync(join(tmpdir(), 'car-rc-test-'));
+  const testFile = join(dir, 'rc');
+  after(async () => { await rm(dir, { recursive: true, force: true }); });
 
   it('adds wrapper to empty file', async () => {
     await writeFile(testFile, '');
@@ -73,8 +75,9 @@ describe('injectWrapper', () => {
 });
 
 describe('removeWrapper', () => {
-  const testFile = join(tmpdir(), `car-rm-test-${Date.now()}`);
-  afterEach(async () => { try { await unlink(testFile); } catch { /* already gone */ } });
+  const dir = mkdtempSync(join(tmpdir(), 'car-rm-test-'));
+  const testFile = join(dir, 'rc');
+  after(async () => { await rm(dir, { recursive: true, force: true }); });
 
   it('removes wrapper and preserves surrounding content', async () => {
     await writeFile(testFile, `before\n${MARKER_START}\nwrapper stuff\n${MARKER_END}\nafter\n`);

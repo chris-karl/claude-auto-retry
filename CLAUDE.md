@@ -60,7 +60,7 @@ Steps once squash consent is given:
    If the user agrees, delete it with:
    - `git branch -D <branch>` — use **`-D`** (force), **not** `-d`: git does not treat a
      squash merge as a real merge, so `-d` would refuse to delete the branch.
-   - `git push custom-origin --delete <branch>` — to remove it from the remote.
+   - `git push origin --delete <branch>` — to remove it from the remote.
 
 ## Keeping this file accurate
 
@@ -70,11 +70,15 @@ Steps once squash consent is given:
 
 ## Repository context
 
-This repo is a fork, and its two remotes have distinct roles:
+This repo is a public fork of `cheapestinference/claude-auto-retry`, and its two
+remotes have distinct roles:
 
-- **`custom-origin`** (`git@github.com:joldjunge/claude-auto-retry.git`) — our own fork and
-  the **main working remote**. All branches, commits, and pushes go here, and `main` tracks
-  `custom-origin/main`.
-- **`origin`** (`git@github.com:cheapestinference/claude-auto-retry.git`) — the upstream this
-  fork was created from. Kept around only to pull in potentially useful updates from
-  upstream. Treat it as **read-only: never push to `origin`.**
+- **`origin`** (`git@github.com:chris-karl/claude-auto-retry.git`) — our public fork and
+  the **main working remote**. All branches, commits, and pushes go here. The mainline
+  branch is **`master`** (the fork's default branch, matching upstream) — wherever this
+  file says `main`, read `master`.
+- **`old`** (`git@github.com:chris-karl/claude-auto-retry-old.git`) — the pre-public
+  repo this work started in, kept as an archive of that history. Treat it as
+  **read-only: never push to `old`.**
+- Upstream (`github.com/cheapestinference/claude-auto-retry`) is not configured as a
+  remote; add it temporarily if upstream updates should be pulled in.

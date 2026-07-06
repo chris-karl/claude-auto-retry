@@ -6,6 +6,28 @@ Anthropic API error schema, and Claude Code's hooks/transcript surfaces. Ordered
 leverage. Items marked **[done]** ship in the current version; the rest are proposals
 with enough detail to execute.
 
+> **Fork note (2026-07).** These notes were written against the upstream tmux-based
+> implementation. This fork replaced tmux with a PTY the launcher owns plus a
+> headless terminal emulator, which changes the mapping of several terms below:
+>
+> - *`tmux capture-pane`* → reading the rendered screen of `@xterm/headless`
+>   (`src/pty.ts`). The emulator applies cursor moves/clears/redraws, so the
+>   scraper reads the *current* screen, not a raw byte stream.
+> - *`tmux send-keys` + foreground-process checks* → a direct `pty.write()` into
+>   the PTY hosting claude. There is no shell in the PTY and no other app to
+>   type into, so the foreground-safety machinery (§0, §1, §6) is structurally
+>   unnecessary here and was not ported.
+> - *Pane-keyed StopFailure markers (`CLAUDE_AUTO_RETRY_PANE`)* → session-keyed
+>   markers (`CLAUDE_AUTO_RETRY_SESSION`, the launcher PID) — see `src/events.ts`.
+> - *Detached `monitor.js` daemon per pane (§5)* → the monitor runs in-process in
+>   the launcher and dies with it, so monitor pile-ups and pane-ID reuse (§5)
+>   cannot occur.
+> - The `/rate-limit-options` menu is dismissed with Escape before submitting the
+>   retry, rather than driven with arrow keys + Enter.
+>
+> The analysis of Claude Code's error renders, retryability classes, and the
+> StopFailure hook (§0–§4, §7–§9) applies to this fork unchanged.
+
 ## 0. The core problem: we scrape a human-facing render
 
 The overload path detects a *terminal* API error by scraping `tmux capture-pane` and

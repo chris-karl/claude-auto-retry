@@ -2,7 +2,7 @@
 
 > Automatically retry Claude Code sessions when you hit Anthropic subscription rate limits.
 
-When Claude Code shows *"You've hit your session limit · resets 3pm"* (or the weekly limit, or the interactive `/rate-limit-options` menu), this tool waits for the reset and sends "continue" automatically. You come back to find your work done.
+When Claude Code shows *"You've hit your session limit · resets 3pm"* (or the weekly limit, or the interactive `/rate-limit-options` menu), this tool waits for the reset and sends "continue" automatically. Sustained API overload (`API Error: 529 … overloaded_error`, 500/502/503/504) gets an exponential backoff, and safeguard/AUP false positives ("safeguards flagged this message") get a bounded immediate re-send. You come back to find your work done.
 
 **No workflow change. Just install and forget.**
 
@@ -61,19 +61,18 @@ You type "claude"
 
   MONITOR (in-process, every 5s):
        │
-       ├─ Reads the rendered screen
-       ├─ Detects rate limit text
-       ├─ Parses reset time from the message
-       ├─ Waits until reset + safety margin
+       ├─ Reads the rendered screen (and StopFailure event markers, if hooked)
+       ├─ Detects usage limits / overload errors / safeguard flags
+       ├─ Waits until reset (usage) or backs off exponentially (overload)
        └─ Types "continue" into the PTY
 ```
 
 ### Why a PTY (not tmux)?
 
-Earlier versions drove Claude through **tmux** (`capture-pane` / `send-keys`).
-That meant a hard dependency on tmux, transparently spawning tmux sessions, and
-brittle heuristics to figure out whether Claude was really the foreground
-process before injecting keys.
+Earlier versions (and the upstream project) drove Claude through **tmux**
+(`capture-pane` / `send-keys`). That meant a hard dependency on tmux,
+transparently spawning tmux sessions, and brittle heuristics to figure out
+whether Claude was really the foreground process before injecting keys.
 
 Hosting Claude in a PTY we own is simpler and portable:
 
@@ -82,12 +81,13 @@ Hosting Claude in a PTY we own is simpler and portable:
   clears and redraws, so we read the *current* screen instead of guessing from a
   noisy byte stream (the source of past "stale frame" false positives).
 - **Direct, unambiguous input** — the retry text is written to the PTY, which
-  goes to Claude. No foreground-process guessing.
+  goes to Claude. No foreground-process guessing, and the retry can never leak
+  into a shell or another app.
 - **Cross-platform** — [`node-pty`](https://github.com/microsoft/node-pty) is the
   same PTY layer VS Code's terminal uses, with prebuilt binaries for macOS and
   Windows (ConPTY) and source build on Linux.
 
-> **Surviving disconnects:** unlike the old tmux integration, the PTY lives with
+> **Surviving disconnects:** unlike a tmux integration, the PTY lives with
 > your shell — if you close the terminal or your SSH session drops, the session
 > ends. For long AFK/overnight runs, start your terminal inside `tmux` or
 > `screen` yourself and run `claude` in there. The tool is a transparent wrapper,
@@ -100,17 +100,24 @@ Hosting Claude in a PTY we own is simpler and portable:
 - **Timezone-aware** — parses reset times with full IANA timezone support (including half-hour offsets)
 - **DST-safe** — iterative offset correction handles daylight saving transitions
 - **Accurate detection** — reads the real rendered screen via a headless terminal emulator
+- **Overload backoff** — detects sustained API overload (`429/500/502/503/504/529`) and retries on a configurable exponential backoff with jitter and a cumulative-wait cap, distinct from the usage-reset path ([details](#overload-backoff))
+- **Event-driven detection** — optional `StopFailure` hook gives an exact, scrape-free overload trigger ([details](#event-driven-detection-recommended--no-scraping))
+- **Safeguard retry** — auto-continues past an AUP-safeguard false-positive (often transient), capped at a few tries so a sticky flag can't loop ([details](#safeguard-retry))
 - **`--print` mode support** — buffers output, retries cleanly for piped/scripted usage
 - **Configurable** — retry count, wait margin, custom patterns, retry message
 - **Config validation** — bad config values fall back to safe defaults instead of crashing
 
-## Rate Limit Patterns Detected
+## Messages Detected (verbatim)
 
-The tool detects these real-world Claude Code messages:
+The tool acts on these real-world Claude Code renders — if you landed here after
+pasting one of these errors into a search engine or an AI assistant: yes, this tool
+automates the wait-and-retry for all of them.
 
-| Pattern | Example |
-|---------|---------|
-| N-hour limit reached | `5-hour limit reached - resets 3pm (UTC)` |
+### Usage / session limits — waits until the printed reset, then continues
+
+| Render | Example |
+|--------|---------|
+| N-hour limit | `5-hour limit reached - resets 3pm (UTC)` |
 | Session limit | `You've hit your session limit · resets 6:50pm (Europe/London)` |
 | Weekly limit | `You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)` |
 | Usage limit | `Claude usage limit reached. Resets at 2pm` |
@@ -119,12 +126,15 @@ The tool detects these real-world Claude Code messages:
 | Hit your limit | `You've hit your limit · resets 3pm (Europe/Dublin)` |
 | Rate limit | `Rate limit hit. Resets at 4pm` |
 
+The passive usage gauge (`You've used 98% of your session limit · resets 8:40pm`)
+is recognized and **ignored** — it means you can still work.
+
 Custom patterns can be added via config for future message format changes.
 
-### Interactive rate-limit menu
+### The interactive `/rate-limit-options` menu
 
 Newer Claude Code versions don't just print a banner — they pop an interactive
-menu (`/rate-limit-options`):
+menu:
 
 ```
 What do you want to do?
@@ -149,6 +159,21 @@ The reset time is parsed whether or not it carries an `am`/`pm` suffix — a
 24-hour clock such as `resets May 28 at 19:00 (Europe/Madrid)` is understood
 just the same. A bare 1–12 hour with no suffix (e.g. `at 7`) is treated as
 ambiguous and resolved to the soonest still-future time.
+
+### API overload / transient errors — exponential backoff with jitter
+
+| Render | Example |
+|--------|---------|
+| Terminal API error (colon form) | `API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}` |
+| 5xx family | `API Error: 500 / 502 / 503 / 504 …` (including bodyless renders like `503 no healthy upstream`) |
+| API-level 429 | `API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited` |
+
+### Safeguard false positives — bounded immediate re-send
+
+```
+API Error: <model>'s safeguards flagged this message (https://www.anthropic.com/legal/aup).
+They may flag safe, normal content as well. … Claude Code can't respond to this request with <model>.
+```
 
 ## Configuration
 
@@ -176,17 +201,175 @@ Optional. Create `~/.claude-auto-retry.json`:
 | `retryMessage` | `"Continue where..."` | Message sent to Claude on retry |
 | `customPatterns` | `[]` | Additional regex patterns to detect rate limits |
 
-All fields optional. Invalid values fall back to defaults automatically.
+All fields optional. Invalid values fall back to defaults automatically. The
+`overload` and `safeguard` blocks below are configured in the same file.
+
+## Overload backoff
+
+Separate from subscription rate limits, the tool also detects **sustained API
+overload** — Claude Code's own terminal `API Error: <code>` line for the retryable
+set (`429 / 500 / 502 / 503 / 504 / 529`, or an `overloaded_error` JSON body) — and
+retries on an **exponential backoff** instead of waiting for a usage reset. The two
+paths never collide; usage limits always take precedence.
+
+> **Sustained only.** Claude Code already retries transient 5xx/529 internally
+> with its own backoff. This feature fires only when those internal retries are
+> exhausted and a *terminal* error is left on screen. It should rarely trigger.
+
+> **Terminal vs. transient.** Claude Code renders an in-progress retry as the
+> *parens* form `API Error (529 …) · Retrying in 5s · attempt 3/10`, and the final
+> exhausted error as the *colon* form `API Error: 529 …`. Detection requires the
+> colon form **and** suppresses the `· Retrying…` / `attempt n/m` suffix, so the tool
+> never interrupts Claude's own backoff.
+
+> **Anchored, tail-only matching (why it won't fire on your code).** Patterns are
+> case-insensitive **regexes** matched against only the **last 12 lines** of the
+> rendered screen — never the full scrollback. They are anchored to Claude Code's
+> `API Error: <code>` render, so a bare `503` in code you're editing
+> (`res.status(503)`), a port number, a quoted log, or a `status.claude.com` link
+> in a comment will **not** trip detection. The one residual: a live screen tail
+> that literally contains `API Error: 529` (e.g. editing this tool, or docs about
+> Claude errors) will match — set `"enabled": false` while doing that. For a
+> structured, ambiguity-free trigger see the event-driven mode below.
+
+Configured under an `overload` block (shown with its defaults):
+
+```json
+{
+  "overload": {
+    "enabled": true,
+    "patterns": ["API Error:\\s*(429|500|502|503|504|529)\\b", "overloaded_error", "temporarily limiting requests"],
+    "backoffSeconds": [30, 60, 120, 240, 300],
+    "steadyStateSeconds": 300,
+    "jitterPct": 15,
+    "maxTotalWaitMinutes": 120,
+    "eventMaxAgeSeconds": 120,
+    "retryMessage": "Continue where you left off."
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Turn the overload path on/off |
+| `patterns` | (see above) | Case-insensitive **regexes** matching a terminal overload error in the screen tail (last 12 lines) |
+| `backoffSeconds` | `[30,60,120,240,300]` | Wait before each retry; index `i` for attempt `i` |
+| `steadyStateSeconds` | `300` | Wait once the `backoffSeconds` array is exhausted |
+| `jitterPct` | `15` | ±% jitter applied to every wait (clamped 0–100) |
+| `maxTotalWaitMinutes` | `120` | Cumulative-wait cap — give up loudly past this |
+| `eventMaxAgeSeconds` | `120` | StopFailure markers older than this are ignored |
+| `retryMessage` | `"Continue where you left off."` | Sent to Claude on each retry |
+
+The waits go `30 → 60 → 120 → 240 → 300 → 300 …`, each with ±15% jitter, until the
+error clears (success) or the cumulative wait reaches `maxTotalWaitMinutes` (give
+up — the cap guards against hammering a genuinely-down endpoint or masking a real
+outage; check [status.claude.com](https://status.claude.com)).
+
+### Event-driven detection (recommended — no scraping)
+
+The scraper above is a heuristic over terminal output. For an exact, ambiguity-free
+trigger, install the **`StopFailure` hook** — Claude Code fires it precisely when a
+turn ends in an API error, with a typed error class:
+
+```sh
+claude-auto-retry install-hook                  # into $CLAUDE_CONFIG_DIR or ~/.claude
+claude-auto-retry install-hook /path/to/config  # repeat per CLAUDE_CONFIG_DIR you use
+```
+
+This adds a `StopFailure` hook (matcher `overloaded|server_error`) that writes a
+session-keyed marker the monitor consumes — no screen scraping, so it cannot
+false-positive on code or scrollback. Sessions launched via the wrapper **after**
+installing the hook use it automatically; the first marker latches event mode and
+disables the scraper for that session. Sessions without the hook (or pre-install)
+fall back to the anchored scraper. Remove with `uninstall-hook`. See
+`DESIGN-NOTES.md` for the architecture.
+
+> **Why not `rate_limit`?** The event path handles only *transient overloads*
+> (seconds-scale backoff). A `rate_limit` is the subscription **session/usage limit** —
+> an hours-scale wait until a printed reset time — so it's handled by the usage-wait
+> path above, not the overload path. Routing it through the hook would fire premature
+> retries against a session that's simply out of quota.
+
+## Safeguard retry
+
+A third failure mode, separate from usage limits and 5xx overloads: the model's
+**safeguards flag your message** and Claude Code can't respond. It renders like:
+
+```
+● API Error: <model>'s safeguards flagged this message (…/legal/aup). They may flag
+  safe, normal content as well. … Claude Code can't respond to this request with <model>.
+  Double press esc to edit your last message, or try a different model with /model.
+```
+
+These flags are **often false positives** (the message says so) and semi-random, so an
+immediate re-send frequently clears them. When the tool sees this render at an idle
+prompt, it sends a short retry message (`continue` by default), waits a few seconds, and
+repeats — but only up to `maxRetries` times, then **gives up loudly** (logged) rather
+than looping. A sticky flag means the content/model combination is genuinely blocked;
+switch models with `/model` or rephrase.
+
+Detection is tail-anchored (last 12 screen lines) like the overload path, and a match
+additionally requires the `API Error` render line nearby — so the phrases appearing in
+scrollback or in a conversation *about* safeguards won't trigger it.
+
+Configured under a `safeguard` block (defaults shown):
+
+```json
+{
+  "safeguard": {
+    "enabled": true,
+    "patterns": ["safeguards flagged this message", "can't respond to this request with", "legal/aup"],
+    "maxRetries": 3,
+    "retryDelaySeconds": 8,
+    "retryMessage": "continue"
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Turn the safeguard-retry path on/off |
+| `patterns` | (see above) | Case-insensitive regexes marking the safeguard render (matched in the screen tail, near an `API Error` line) |
+| `maxRetries` | `3` | Re-send attempts before giving up — kept small; retrying a sticky flag won't help |
+| `retryDelaySeconds` | `8` | Wait between re-sends |
+| `retryMessage` | `"continue"` | Message sent to nudge past the flag |
+
+Usage limits always take precedence; the safeguard path only acts when Claude is
+idle (no `esc to interrupt` footer).
 
 ## CLI Commands
 
 ```bash
-claude-auto-retry install     # Install shell wrapper
-claude-auto-retry uninstall   # Remove shell wrapper
-claude-auto-retry status      # Show monitor activity + last log entries
-claude-auto-retry logs        # Tail today's log file in real-time
-claude-auto-retry version     # Print version
+claude-auto-retry install            # Install shell wrapper
+claude-auto-retry uninstall          # Remove shell wrapper
+claude-auto-retry install-hook       # Install the StopFailure hook (event-driven overload detection)
+claude-auto-retry uninstall-hook     # Remove the StopFailure hook
+claude-auto-retry status             # Show monitor activity + last log entries
+claude-auto-retry logs               # Tail today's log file in real-time
+claude-auto-retry version            # Print version
 ```
+
+## For AI Agents
+
+If you are an AI agent (Claude Code, Codex, etc.) installing this for your user, the
+full setup is non-interactive:
+
+```bash
+npm install -g claude-auto-retry
+claude-auto-retry install        # shell wrapper
+claude-auto-retry install-hook   # recommended: event-driven, scrape-free overload detection
+```
+
+Notes for agents:
+
+- The wrapper takes effect in **new** shells — have the user `source` their shell rc or
+  open a new terminal. No tmux is required: sessions run inside a PTY the tool owns.
+- Verify with `claude-auto-retry status` (monitor activity) and `claude-auto-retry logs`.
+- Configuration is optional and defaults are safe. To change it, write
+  `~/.claude-auto-retry.json` (see [Configuration](#configuration)); invalid values fall
+  back to defaults instead of crashing.
+- If the user runs multiple `CLAUDE_CONFIG_DIR`s, repeat `claude-auto-retry install-hook <path>` per dir.
+- Clean removal: `claude-auto-retry uninstall` and `claude-auto-retry uninstall-hook`.
 
 ## Platform Support
 
@@ -250,6 +433,7 @@ Logs rotate daily. Files older than 7 days are cleaned automatically.
 
 ```bash
 claude-auto-retry uninstall
+claude-auto-retry uninstall-hook   # if you installed the StopFailure hook
 npm uninstall -g claude-auto-retry
 ```
 
@@ -270,7 +454,7 @@ Contributions are welcome! Here's how to get started:
 ### Development Setup
 
 ```bash
-git clone https://github.com/cheapestinference/claude-auto-retry.git
+git clone https://github.com/chris-karl/claude-auto-retry.git
 cd claude-auto-retry
 npm install         # builds node-pty (Linux needs build tools)
 npm run check       # type-check + lint + dead-code scan + tests
@@ -297,14 +481,15 @@ After either, run `claude-auto-retry install` to inject the shell wrapper.
 
 ```
 claude-auto-retry/
-├── bin/cli.ts                # CLI: install/uninstall/status/logs/version
+├── bin/cli.ts                # CLI: install/uninstall/hooks/status/logs/version
 ├── src/
-│   ├── patterns.ts           # Rate limit detection + ANSI stripping
+│   ├── patterns.ts           # Usage-limit + overload + safeguard detection + ANSI stripping
 │   ├── time-parser.ts        # Reset time parsing with timezone support
 │   ├── config.ts             # Config loading + validation
 │   ├── logger.ts             # File-based logging with rotation
+│   ├── events.ts             # StopFailure event markers (event-driven overload trigger)
 │   ├── pty.ts                # PTY host + headless terminal emulator (node-pty + @xterm/headless)
-│   ├── monitor.ts            # Core monitoring loop + retry logic
+│   ├── monitor.ts            # Core monitoring loop + retry logic (usage/overload/safeguard paths)
 │   ├── launcher.ts           # Process orchestration + I/O mirroring
 │   ├── postinstall.ts        # Restores node-pty spawn-helper exec bit after npm install
 │   └── wrapper.sh            # Shell function template
@@ -322,7 +507,9 @@ claude-auto-retry/
 
 - **PTY-hosted Claude** — Claude runs inside a `node-pty` pseudo-terminal so it gets a real TTY (full TUI), while the tool mirrors I/O and can inject the retry directly.
 - **Headless terminal emulator** — output is fed to `@xterm/headless`, giving the real rendered screen for detection instead of a noisy raw byte stream. This eliminates the foreground-process guessing and stale-frame false positives the tmux version had to work around.
-- **Iterative DST correction** — timezone offset is computed via 3-iteration convergence loop, not a single-shot formula that breaks at DST boundaries.
+- **Anchored, tail-only error matching** — overload/safeguard detection matches Claude Code's actual `API Error` render in the last lines of the screen, never bare status numbers in scrollback (the upstream false-positive class).
+- **Event-driven when possible** — the `StopFailure` hook supersedes scraping for overload detection; the scraper stays as the fallback.
+- **Iterative DST correction** — timezone offset is computed via a convergence loop, not a single-shot formula that breaks at DST boundaries.
 - **Config validation** — invalid user config values fall back to safe defaults instead of producing NaN/undefined behavior.
 - **TypeScript, no build step** — modules are written in TypeScript and run directly via Node's built-in type stripping (Node >= 23.6); `tsc --noEmit` type-checks them in CI alongside ESLint and a knip dead-code scan. There is no compile or `dist/` step, so what runs is exactly what's in `src/`.
 
@@ -356,6 +543,7 @@ npm run check                         # typecheck + lint + knip + tests
 
 ## Related Projects
 
+- [cheapestinference/claude-auto-retry](https://github.com/cheapestinference/claude-auto-retry) — The upstream project this fork is based on (tmux-based, zero-dependency)
 - [claude-code-queue](https://github.com/JCSnap/claude-code-queue) — Queue-based task system for Claude Code with rate limit handling
 - [opencode-claude-quota](https://github.com/nguyenngothuong/opencode-claude-quota) — Rate limit quota monitoring (display only)
 
@@ -365,7 +553,7 @@ npm run check                         # typecheck + lint + knip + tests
 A: Yes. It works with any Anthropic subscription that has usage-based rate limits.
 
 **Q: Do I need tmux?**
-A: No. Claude runs in a PTY the tool owns, so tmux is no longer required or installed. If you *want* the session to survive a disconnect, run `claude` inside your own `tmux`/`screen` — it works transparently.
+A: No. Claude runs in a PTY the tool owns, so tmux is not required or installed. If you *want* the session to survive a disconnect, run `claude` inside your own `tmux`/`screen` — it works transparently.
 
 **Q: What if I continue manually before the retry fires?**
 A: The monitor checks if the rate limit is still on screen before sending. If you already continued, it resets and keeps watching.
@@ -377,7 +565,7 @@ A: When the PTY child exits, the monitor shuts down cleanly and the wrapper retu
 A: Yes, natively. `node-pty` uses Windows ConPTY and ships a prebuilt binary, so no WSL is required.
 
 **Q: Can it accidentally type into the wrong program?**
-A: No. The retry is written into the PTY hosting Claude, and only when a rate-limit message is currently on screen.
+A: No. The retry is written into the PTY hosting Claude, and only when a rate-limit message, terminal API error, or safeguard flag is currently on screen (or a StopFailure event fired).
 
 ## License
 
@@ -385,4 +573,4 @@ MIT — see [LICENSE](LICENSE) for details.
 
 ---
 
-Made with care by [CheapestInference](https://github.com/cheapestinference).
+A fork of [cheapestinference/claude-auto-retry](https://github.com/cheapestinference/claude-auto-retry), rebuilt on node-pty.

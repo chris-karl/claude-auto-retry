@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isClaudeBusy } from '../src/patterns.ts';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isWorking } from '../src/patterns.ts';
 
 describe('stripAnsi', () => {
   it('removes bold codes', () => {
@@ -140,15 +140,29 @@ describe('isLimitMenuPrompt', () => {
   });
 });
 
-describe('isClaudeBusy', () => {
+describe('isWorking', () => {
   it('detects the "esc to interrupt" processing footer', () => {
-    assert.equal(isClaudeBusy('✻ Cogitating… (12s · ↓ 3.4k tokens · esc to interrupt)'), true);
+    assert.equal(isWorking('✻ Cogitating… (12s · ↓ 3.4k tokens · esc to interrupt)'), true);
+  });
+  it('detects esc/interrupt through ANSI', () => {
+    assert.equal(isWorking('\x1b[2mesc to interrupt\x1b[0m'), true);
   });
   it('returns false for normal output', () => {
-    assert.equal(isClaudeBusy('Here is the code you asked for'), false);
+    assert.equal(isWorking('Here is the code you asked for'), false);
   });
-  it('does not confuse the menu\'s "Esc to cancel" with busy', () => {
-    assert.equal(isClaudeBusy('What do you want to do?\nEnter to confirm · Esc to cancel'), false);
+  it('does not confuse the menu\'s "Esc to cancel" with working', () => {
+    assert.equal(isWorking('What do you want to do?\nEnter to confirm · Esc to cancel'), false);
+  });
+  // Claude's internal-retry indicator means retries are NOT exhausted → not terminal.
+  it('treats the "Retrying in" suffix as still-working', () => {
+    assert.equal(isWorking('API Error: 529 Overloaded · Retrying in 5s · attempt 3/10'), true);
+  });
+  it('treats an "attempt n/m" indicator as still-working', () => {
+    assert.equal(isWorking('thinking… attempt 2/10'), true);
+  });
+  it('ignores a working footer that scrolled far up out of the tail', () => {
+    const screen = ['old… (esc to interrupt)', ...Array(15).fill('● unrelated output'), '❯ '].join('\n');
+    assert.equal(isWorking(screen), false);
   });
 });
 

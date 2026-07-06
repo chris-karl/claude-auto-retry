@@ -1,6 +1,7 @@
-import { isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isClaudeBusy } from './patterns.ts';
+import { isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isWorking, overloadMatch, detectOverload } from './patterns.ts';
+import type { PatternMatch } from './patterns.ts';
 import { parseResetTime, calculateWaitMs } from './time-parser.ts';
-import type { Config } from './config.ts';
+import type { Config, OverloadConfig } from './config.ts';
 import type { Logger } from './logger.ts';
 
 // How many lines of the rendered screen to scan for the rate-limit banner. Kept
@@ -21,11 +22,16 @@ const MENU_DISMISS_SETTLE_MS = 250;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export interface MonitorState {
-  status: 'monitoring' | 'waiting';
+  status: 'monitoring' | 'waiting' | 'overload';
   waitUntil: number;
   attempts: number;
   lastRateLimitMessage: string | null;
   retrySent: boolean;
+  // Overload-retry sub-state, kept distinct from the usage-reset fields above.
+  overloadAttempts: number;
+  overloadTotalWaitMs: number;
+  overloadWaitUntil: number;
+  lastOverloadMatch: PatternMatch | null;
 }
 
 // Adapter over the PTY-hosted terminal the monitor drives.
@@ -37,10 +43,68 @@ export interface ScreenAdapter {
 
 export type TickResult =
   | 'exit' | 'monitoring' | 'waiting' | 'retried' | 'retry-failed'
-  | 'retry-succeeded' | 'user-continued' | 'max-retries';
+  | 'retry-succeeded' | 'user-continued' | 'max-retries'
+  | 'overload-detected' | 'overload-waiting' | 'overload-working' | 'overload-retried'
+  | 'overload-retry-failed' | 'overload-cleared' | 'overload-gave-up';
 
 export function createMonitorState(): MonitorState {
-  return { status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null, retrySent: false };
+  return {
+    status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null, retrySent: false,
+    overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0, lastOverloadMatch: null,
+  };
+}
+
+// --- Overload backoff schedule (pure, testable) ---
+// Wait backoffSeconds[i] for attempt i; once the array is exhausted, steadyStateSeconds.
+export function overloadBaseWaitMs(attemptIndex: number, overload: OverloadConfig): number {
+  const { backoffSeconds, steadyStateSeconds } = overload;
+  const secs = attemptIndex < backoffSeconds.length ? backoffSeconds[attemptIndex] : steadyStateSeconds;
+  return secs * 1000;
+}
+
+export function applyJitter(ms: number, jitterPct: number, rand: () => number = Math.random): number {
+  if (!jitterPct) return ms;
+  const factor = 1 + (rand() * 2 - 1) * (jitterPct / 100);  // ±jitterPct%
+  return Math.max(0, Math.round(ms * factor));
+}
+
+export function nextOverloadWaitMs(attemptIndex: number, overload: OverloadConfig, rand: () => number = Math.random): number {
+  return applyJitter(overloadBaseWaitMs(attemptIndex, overload), overload.jitterPct, rand);
+}
+
+function resetOverload(state: MonitorState): void {
+  state.overloadAttempts = 0;
+  state.overloadTotalWaitMs = 0;
+  state.overloadWaitUntil = 0;
+}
+
+// Shared entry into the (hours-scale) usage-reset wait, from plain monitoring or
+// as the handoff when a usage limit appears mid-overload.
+function enterUsageWait(state: MonitorState, screenText: string, config: Config): TickResult {
+  const message = findRateLimitMessage(screenText);
+  state.lastRateLimitMessage = message;
+  const parsed = message ? parseResetTime(message) : null;
+  state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+  state.status = 'waiting';
+  state.retrySent = false; // start of a fresh rate-limit episode
+  return 'waiting';
+}
+
+function enterOverload(state: MonitorState, overload: OverloadConfig, rand: () => number): TickResult {
+  const capMs = overload.maxTotalWaitMinutes * 60_000;
+  resetOverload(state);
+  state.status = 'overload';
+  const w = nextOverloadWaitMs(0, overload, rand);
+  if (w > capMs) {
+    // Degenerate config (first backoff already exceeds the cap): force the cap to
+    // trip on the next tick rather than entering a real retry loop.
+    state.overloadTotalWaitMs = capMs;
+    state.overloadWaitUntil = 0;
+    return 'overload-detected';
+  }
+  state.overloadTotalWaitMs = w;
+  state.overloadWaitUntil = Date.now() + w;
+  return 'overload-detected';
 }
 
 // One tick of the state machine. Because Claude runs inside a PTY we own, there
@@ -51,6 +115,7 @@ export async function processOneTick(
   screen: ScreenAdapter,
   config: Config,
   isAlive: () => boolean,
+  rand: () => number = Math.random,
 ): Promise<TickResult> {
   if (!isAlive()) return 'exit';
 
@@ -60,9 +125,10 @@ export async function processOneTick(
   // Newer Claude Code replaces the plain banner with an interactive
   // `/rate-limit-options` menu; that counts as a rate-limit indicator too.
   const menuUp = isLimitMenuPrompt(screenText);
-  // If the "I'm working" footer is showing (and the menu isn't), a rate-limit
-  // banner still on screen is stale and must not be treated as a fresh limit.
-  const busy = isClaudeBusy(screenText);
+  // If Claude is mid-flight (streaming, or running its own internal API retry)
+  // and the menu isn't up, a rate-limit banner still on screen is stale and an
+  // API error is not yet terminal.
+  const busy = isWorking(screenText);
   const limited = menuUp || isRateLimited(screenText, config.customPatterns);
 
   if (state.status === 'waiting') {
@@ -112,16 +178,71 @@ export async function processOneTick(
     return 'retried';
   }
 
+  if (state.status === 'overload') {
+    if (Date.now() < state.overloadWaitUntil) return 'overload-waiting';
+    if (!isAlive()) return 'exit';
+
+    const overload = config.overload;
+    const capMs = overload.maxTotalWaitMinutes * 60_000;
+
+    // Usage-limit takes precedence: hand off to the (hours-scale) reset path.
+    if (limited && (menuUp || !busy)) {
+      resetOverload(state);
+      return enterUsageWait(state, screenText, config);
+    }
+
+    // Overload text gone → recovered. Back to plain monitoring.
+    if (!detectOverload(screenText, overload.patterns)) {
+      resetOverload(state);
+      state.status = 'monitoring';
+      return 'overload-cleared';
+    }
+
+    // Terminal-state gate: if Claude is actively working (its own internal retry
+    // or a fresh response is streaming), the error is NOT terminal. Defer without
+    // consuming an attempt so we never double-drive a live session.
+    if (busy) {
+      state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'overload-working';
+    }
+
+    // Mandatory cap: give up loudly rather than hammer a genuinely-down endpoint
+    // or mask a real outage. Long cooldown to avoid re-detecting the stale error.
+    if (state.overloadTotalWaitMs >= capMs) {
+      state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * MAX_RETRIES_BACKOFF_INTERVALS);
+      return 'overload-gave-up';
+    }
+
+    // Increment + schedule the next backoff window BEFORE send() so a failure
+    // still consumes the slot and avoids a tight error loop.
+    state.overloadAttempts++;
+    const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);
+    state.overloadTotalWaitMs += w;
+    state.overloadWaitUntil = Date.now() + w;
+    try {
+      await screen.send(overload.retryMessage);
+    } catch {
+      return 'overload-retry-failed';
+    }
+    return 'overload-retried';
+  }
+
+  // --- monitoring ---
   // Enter waiting on a fresh limit — but ignore a banner merely lingering while
-  // Claude is actively working (unless the menu is blocking input).
+  // Claude is actively working (unless the menu is blocking input). Usage limits
+  // (hours-scale reset) take precedence over overload (seconds-scale).
   if (limited && (menuUp || !busy)) {
-    const message = findRateLimitMessage(screenText);
-    state.lastRateLimitMessage = message;
-    const parsed = message ? parseResetTime(message) : null;
-    state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
-    state.status = 'waiting';
-    state.retrySent = false; // start of a fresh rate-limit episode
-    return 'waiting';
+    return enterUsageWait(state, screenText, config);
+  }
+
+  // Sustained-overload scraper: only when Claude is idle (a terminal error is the
+  // last thing on screen, never mid-flight).
+  if (config.overload.enabled && !busy) {
+    const match = overloadMatch(screenText, config.overload.patterns);
+    if (match) {
+      state.lastOverloadMatch = match;  // surfaced in the 'overload-detected' log line
+      return enterOverload(state, config.overload, rand);
+    }
   }
 
   return 'monitoring';
@@ -139,6 +260,7 @@ export function runMonitor(
   const state = createMonitorState();
   let consecutiveErrors = 0;
   let maxRetriesLogged = false;
+  let overloadGaveUpLogged = false;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const MAX_CONSECUTIVE_ERRORS = 10;
@@ -171,6 +293,23 @@ export function runMonitor(
       if (result === 'max-retries' && !maxRetriesLogged) {
         maxRetriesLogged = true;
         log('warn', `Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
+      }
+      if (result === 'overload-detected') {
+        const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
+        const m = state.lastOverloadMatch;
+        const why = m ? ` [matched /${m.pattern}/ in: "${m.line}"]` : '';
+        log('warn', `Overload/transient API error detected (sustained)${why}. Backing off ${secs}s before retry. NOTE: Claude Code retries 5xx/529 internally — this only fires on terminal overload.`);
+      }
+      if (result === 'overload-retried') {
+        const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
+        log('info', `Overload retry sent (attempt ${state.overloadAttempts}). Next backoff ${secs}s. Cumulative wait ${Math.round(state.overloadTotalWaitMs / 1000)}s.`);
+      }
+      if (result === 'overload-retry-failed') log('warn', `Overload retry send failed (attempt ${state.overloadAttempts}); will retry after the backoff window.`);
+      if (result === 'overload-working') log('info', 'Overload text present but Claude is working (internal retry/streaming). Deferring — not terminal.');
+      if (result === 'overload-cleared') { overloadGaveUpLogged = false; log('info', 'Overload cleared. Resuming normal monitoring.'); }
+      if (result === 'overload-gave-up' && !overloadGaveUpLogged) {
+        overloadGaveUpLogged = true;
+        log('warn', `Overload backoff cap reached (maxTotalWaitMinutes=${config.overload.maxTotalWaitMinutes}). Giving up — endpoint may be genuinely down (check status.claude.com). Will not retry until the error clears.`);
       }
     } catch (err) {
       consecutiveErrors++;

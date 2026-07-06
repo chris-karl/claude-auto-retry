@@ -213,3 +213,37 @@ export function overloadMatch(text: string, patterns: Array<string | RegExp> = [
 export function detectOverload(text: string, patterns: Array<string | RegExp> = []): boolean {
   return overloadMatch(text, patterns) !== null;
 }
+
+// --- Safeguard / AUP false-positive detection ---
+// A distinct failure mode from usage limits and 5xx overloads: the model's safeguards
+// flag the message (often a false positive — the error itself says it "may flag safe,
+// normal content"). It renders like:
+//   ● API Error: <model>'s safeguards flagged this message (…/legal/aup). … Claude Code
+//     can't respond to this request with <model>.
+//     Double press esc to edit your last message, or try a different model with /model.
+// Because the flag is semi-random, an immediate re-send frequently clears it — but it
+// must be capped so a *sticky* flag doesn't loop forever. Tail-anchored like overload.
+// Anchor: a REAL flag always renders as an `API Error:` line. Requiring it nearby (same
+// wrap-tolerant window isRateLimited uses for limit/resets pairing) keeps the phrases
+// from firing on ordinary conversation — Claude quoting the AUP link or discussing
+// safeguard errors at an idle prompt must not trigger a retry.
+const SAFEGUARD_ANCHOR: RegExp[] = [/\bAPI Error\b/i];
+
+export function safeguardMatch(text: string, patterns: Array<string | RegExp> = []): PatternMatch | null {
+  if (!patterns || patterns.length === 0) return null;
+  const lines = tail(text);
+  if (!lines.join('').trim()) return null;
+  const regexes = toRegexes(patterns);
+  for (let i = 0; i < lines.length; i++) {
+    for (const r of regexes) {
+      if (r.test(lines[i]) && hasNearbyMatch(lines, i, SAFEGUARD_ANCHOR)) {
+        return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
+      }
+    }
+  }
+  return null;
+}
+
+export function detectSafeguard(text: string, patterns: Array<string | RegExp> = []): boolean {
+  return safeguardMatch(text, patterns) !== null;
+}

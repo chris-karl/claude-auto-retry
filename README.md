@@ -1,3 +1,9 @@
+> **Note:** This repository is a fork of
+> [cheapestinference/claude-auto-retry](https://github.com/cheapestinference/claude-auto-retry).
+> On top of the upstream project, it replaces the tmux dependency with a self-hosted
+> pseudo-terminal (`node-pty`), which adds native Windows and prebuilt macOS support.
+> It also adds API-overload backoff, event-driven detection, and a safeguard-flag retry path.
+
 # claude-auto-retry
 
 > Automatically retry Claude Code sessions when you hit Anthropic subscription rate limits.
@@ -570,7 +576,3 @@ A: No. The retry is written into the PTY hosting Claude, and only when a rate-li
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
-
----
-
-A fork of [cheapestinference/claude-auto-retry](https://github.com/cheapestinference/claude-auto-retry), rebuilt on node-pty.

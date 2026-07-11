@@ -9,8 +9,8 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "cron"
-      # Every second Monday of a month at 5:30
-      cronjob: "30 5 * * MON#2"
+      # Every day at 5:30
+      cronjob: "30 5 * * *"
       timezone: "Europe/Berlin"
     allow:
       - dependency-type: "all"
@@ -28,9 +28,15 @@ updates:
     directory: "/"
     schedule:
       interval: "cron"
-      # Every second Monday of a month at 5:30
-      cronjob: "30 5 * * MON#2"
+      # Every day at 5:30
+      cronjob: "30 5 * * *"
       timezone: "Europe/Berlin"
+    groups:
+      non-major-updates:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
     commit-message:
       # Empty prefix disables the auto-detected "chore(deps): " style
       prefix: ""

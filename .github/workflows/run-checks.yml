@@ -1,0 +1,62 @@
+name: Run Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Lets dependabot-auto-merge.yml run these checks as its merge gate.
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Commit SHA to check instead of the commit that triggered the run'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# The inputs.ref suffix keeps workflow_call runs in groups of their own,
+# so they can never cancel a standalone run (or vice versa).
+concurrency:
+  group: run-checks-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Node >= 23.6 runs .ts directly via built-in type stripping (see engines).
+        node-version: ['24', '26']
+    name: check (node ${{ matrix.node-version }})
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # Skip install scripts: node-pty's native build and the postinstall
+      # exec-bit fix aren't needed to type-check, lint or run the tests
+      # (node-pty is only imported lazily at runtime, never loaded by the
+      # suite).
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Knip
+        run: npm run knip
+
+      - name: Test
+        run: npm test

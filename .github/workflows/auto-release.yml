@@ -1,0 +1,67 @@
+name: Auto-Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      # "auto" releases only Dependabot-authored changes as the next
+      # patch; any other value releases the current main unconditionally
+      # with that component bumped (how human changes get released).
+      bump:
+        description: 'Optional — version component to bump for a manual release'
+        required: false
+        type: choice
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+      # Safety pin: main must point at this SHA or the run aborts — a
+      # release never silently includes more than what was reviewed.
+      commit:
+        description: 'Required — SHA of the commit to release (aborts when main is not exactly there)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Only the latest push to main matters; superseded runs are redundant.
+concurrency:
+  group: auto-release
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Decide whether a release should happen and which tag it gets
+        id: decide
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+        run: .github/scripts/auto-release/decide-release.sh
+
+      - name: Bump the package version to the release tag
+        if: steps.decide.outputs.release == 'true'
+        id: bump
+        env:
+          TAG: ${{ steps.decide.outputs.tag }}
+        run: .github/scripts/auto-release/bump-version.sh
+
+      # The release carries nothing but the auto-generated source
+      # archives, so it is created published in one step.
+      - name: Create the release
+        if: steps.decide.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.decide.outputs.tag }}
+          SHA: ${{ steps.bump.outputs.sha }}
+        run: gh release create "$TAG" --title "$TAG" --generate-notes --target "$SHA"

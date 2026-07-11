@@ -1,0 +1,91 @@
+name: Dependabot Auto-Merge
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Required — number of the Dependabot PR to check and merge'
+        required: true
+        type: string
+      head:
+        description: 'Required — expected head SHA of the PR (aborts if the PR got new commits)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+# One check per PR; a force-push by Dependabot obsoletes the running one.
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  # Check the test merge into current main — exactly the tree the squash
+  # merge will put there, not the PR head alone.
+  resolve-test-merge:
+    if: github.actor == 'dependabot[bot]' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      pr: ${{ steps.resolve.outputs.pr }}
+      merge_sha: ${{ steps.resolve.outputs.merge_sha }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      skip_check: ${{ steps.resolve.outputs.skip_check }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve the test merge commit to check
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_DISPATCH: ${{ inputs.pr }}
+          EXPECTED_HEAD: ${{ inputs.head }}
+          PR_EVENT_NUMBER: ${{ github.event.pull_request.number }}
+          PR_EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          RUN_MERGE_SHA: ${{ github.sha }}
+        run: .github/scripts/dependabot-auto-merge/resolve-test-merge.sh
+
+  # The merge gate: run-checks.yml on the resolved test merge, so a
+  # dispatch retry after main moved validates the fresh combination.
+  check:
+    needs: resolve-test-merge
+    # CI-only PRs skip the checks.
+    if: needs.resolve-test-merge.outputs.merge_sha != '' && needs.resolve-test-merge.outputs.skip_check != 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/run-checks.yml
+    with:
+      ref: ${{ needs.resolve-test-merge.outputs.merge_sha }}
+
+  merge:
+    needs: [resolve-test-merge, check]
+    # The checks may have been skipped (CI-only PR), but not failed.
+    if: >-
+      !cancelled() &&
+      needs.resolve-test-merge.outputs.pr != '' &&
+      (needs.check.result == 'success' || needs.check.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Fetch Dependabot metadata
+        if: github.event_name == 'pull_request'
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Dispatch retries already passed the non-major check once.
+      - name: Merge non-major updates
+        if: github.event_name == 'workflow_dispatch' || steps.metadata.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ needs.resolve-test-merge.outputs.pr }}
+          MERGE_SHA: ${{ needs.resolve-test-merge.outputs.merge_sha }}
+          HEAD_SHA: ${{ needs.resolve-test-merge.outputs.head_sha }}
+        run: .github/scripts/dependabot-auto-merge/merge-pr.sh

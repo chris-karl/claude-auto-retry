@@ -59,7 +59,7 @@ export interface ScreenAdapter {
 
 export type TickResult =
   | 'exit' | 'monitoring' | 'waiting' | 'retried' | 'retry-failed'
-  | 'retry-succeeded' | 'user-continued' | 'max-retries'
+  | 'retry-succeeded' | 'user-continued' | 'max-retries' | 'menu-still-up'
   | 'overload-detected' | 'overload-waiting' | 'overload-working' | 'overload-retried'
   | 'overload-retry-failed' | 'overload-cleared' | 'overload-gave-up' | 'event-ignored'
   | 'safeguard-detected' | 'safeguard-waiting' | 'safeguard-working' | 'safeguard-retried'
@@ -190,6 +190,12 @@ export async function processOneTick(
     if (menuUp) {
       await screen.sendEscape();
       await sleep(MENU_DISMISS_SETTLE_MS);
+      // send() ends with Enter, which on a still-open menu would confirm the
+      // highlighted option. Only proceed once the Escape verifiably worked.
+      if (isLimitMenuPrompt(await screen.capture(DETECTION_LINES))) {
+        state.waitUntil = Date.now() + config.retryCooldownSeconds * 1000;
+        return 'menu-still-up';
+      }
     }
 
     // Increment attempts and set cooldown BEFORE send() so a failure (e.g. PTY
@@ -436,6 +442,7 @@ export function runMonitor(
       if (result === 'retry-failed') log('warn', `Retry send failed (attempt ${state.attempts}); will retry after cooldown.`);
       if (result === 'retry-succeeded') { maxRetriesLogged = false; log('info', 'Auto-retry succeeded. Rate limit cleared. Attempt counter reset.'); }
       if (result === 'user-continued') { maxRetriesLogged = false; log('info', 'User already continued. Attempt counter reset.'); }
+      if (result === 'menu-still-up') log('warn', 'Limit menu still on screen after Escape — holding the retry (Enter could confirm the highlighted option). Will re-check after cooldown.');
       if (result === 'max-retries' && !maxRetriesLogged) {
         maxRetriesLogged = true;
         log('warn', `Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);

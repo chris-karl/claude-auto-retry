@@ -7,18 +7,25 @@ import { DEFAULT_CONFIG } from '../src/config.ts';
 interface MockScreen extends ScreenAdapter {
   _sent: string[];
   _escaped: number;
+  _content: string;
 }
 
-function mockScreen(screenContent = '', { failSend = false }: { failSend?: boolean } = {}): MockScreen {
+// escapeShows: what the screen renders after an Escape (default: unchanged,
+// i.e. the Escape did not dismiss whatever is on screen).
+function mockScreen(screenContent = '', { failSend = false, escapeShows }: { failSend?: boolean; escapeShows?: string } = {}): MockScreen {
   const s: MockScreen = {
     _sent: [],
     _escaped: 0,
-    capture: async () => screenContent,
+    _content: screenContent,
+    capture: async () => s._content,
     send: async (text: string) => {
       if (failSend) throw new Error('PTY destroyed');
       s._sent.push(text);
     },
-    sendEscape: async () => { s._escaped++; },
+    sendEscape: async () => {
+      s._escaped++;
+      if (escapeShows !== undefined) s._content = escapeShows;
+    },
   };
   return s;
 }
@@ -144,12 +151,23 @@ describe('processOneTick', () => {
     assert.equal(s._sent.length, 0);
   });
   it('dismisses the limit menu with Escape (not Enter) before submitting the retry', async () => {
-    const s = mockScreen(MENU);
+    const s = mockScreen(MENU, { escapeShows: "You've hit your session limit · resets 3pm (UTC)" });
     const st = createMonitorState();
     st.waitUntil = Date.now() - 1000; st.status = 'waiting';
     assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'retried');
     assert.equal(s._escaped, 1, 'should press Escape to dismiss the menu');
     assert.equal(s._sent.length, 1, 'should submit the retry message');
+  });
+  it('holds the retry when Escape fails to dismiss the menu', async () => {
+    const s = mockScreen(MENU); // Escape leaves the menu on screen
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting';
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'menu-still-up');
+    assert.equal(s._escaped, 1);
+    assert.equal(s._sent.length, 0, 'must not type into a live menu');
+    assert.equal(st.attempts, 0, 'no send happened, so no attempt consumed');
+    assert.equal(st.status, 'waiting');
+    assert.ok(st.waitUntil > Date.now(), 'cooldown set before the next dismissal try');
   });
   it('does not press Escape when there is no menu (plain banner)', async () => {
     const s = mockScreen('5-hour limit reached - resets 3pm (UTC)');

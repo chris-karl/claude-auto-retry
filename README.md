@@ -64,18 +64,14 @@ claude-auto-retry install        # inject the `claude` shell wrapper
 claude-auto-retry install-hook   # optional: event-driven overload detection
 ```
 
-**What happens on install.** `npm` clones the repo at your chosen ref and runs the
-package's `prepare` step, which compiles the TypeScript sources to plain
-JavaScript in `dist/` — Node refuses to strip TypeScript types under
-`node_modules`, so an installed copy must ship real `.js`. Only that compiled
-output plus the native `node-pty` dependency end up installed; there is no build
-command for you to run.
+The install runs a `prepare` build automatically — nothing to compile yourself.
+**Requirements:** Node.js ≥ 20, plus a C/C++ toolchain on Linux for `node-pty`
+(macOS and Windows use prebuilt binaries — see
+[Platform Support](#platform-support)).
 
-**Requirements.** Node.js ≥ 20, plus — on Linux only — a C/C++ toolchain for
-`node-pty` (macOS and Windows use prebuilt binaries; see
-[Platform Support](#platform-support)). To **update**, re-run your install
-command. To **uninstall**, `npm uninstall -g claude-auto-retry` — the installed
-package keeps the name `claude-auto-retry` no matter which ref you fetched.
+To **update**, re-run your install command. To **uninstall**,
+`npm uninstall -g claude-auto-retry` (the package is always named
+`claude-auto-retry`, whichever ref you fetched).
 
 ## How it Works
 
@@ -443,14 +439,10 @@ Notes for agents:
 
 ### Requirements
 
-- **Node.js** >= 20 — an installed copy runs plain compiled JavaScript, so the
-  runtime floor is set by `node-pty` and ESM, not by TypeScript. Only working in
-  a source checkout (running the `.ts` directly, e.g. the test suite) needs
-  Node's built-in type stripping, enabled by default from Node 22.18 / 23.6
-  onward.
-- **node-pty** — installed automatically as a dependency. Ships prebuilt binaries
-  for macOS and Windows; on Linux it compiles on install, which needs a C/C++
-  toolchain and Python (e.g. `apt-get install -y build-essential python3`).
+- **Node.js** >= 20.
+- **node-pty** — installed automatically. Ships prebuilt binaries for macOS and
+  Windows; on Linux it compiles on install, needing a C/C++ toolchain and Python
+  (e.g. `apt-get install -y build-essential python3`).
 
 ### Shell Support
 
@@ -528,22 +520,16 @@ node bin/cli.ts version     # run any CLI command straight from source
 npm test                    # tests import the .ts sources as-is
 ```
 
-A build step exists only for **packaging**: `npm run build` transpiles `src/` +
-`bin/` to `dist/` (via `tsconfig.build.json` — emit-only, so type-checking stays
-in `npm run check` and a stray type error never breaks an install), and `prepare`
-runs it automatically. Node can't strip TypeScript types under `node_modules`, so
-an installed copy must ship compiled `.js`.
-
-Then install the CLI globally from your local checkout:
+`npm run build` transpiles `src/` + `bin/` to `dist/` (emit-only via
+`tsconfig.build.json`) and `prepare` runs it automatically — the packaging build
+that lets an install ship compiled `.js`. To install the CLI globally from your
+checkout:
 
 ```bash
-npm install -g .    # packs and installs exactly like `npm i -g
-                    # chris-karl/claude-auto-retry`: builds dist/ and installs a
-                    # real copy. Re-run (or `npm run build`) after source edits.
-
-npm link            # symlinks the global bin to this checkout — but the bin is
-                    # the compiled dist/bin/cli.js, so re-run `npm run build`
-                    # after edits (or just run `node bin/cli.ts` directly).
+npm install -g .    # packs and installs like a real GitHub install; re-run
+                    # (or `npm run build`) after source edits
+npm link            # symlinks the global bin to dist/bin/cli.js — re-run
+                    # `npm run build` after edits (or run `node bin/cli.ts`)
 ```
 
 After either, run `claude-auto-retry install` to inject the shell wrapper.
@@ -581,13 +567,12 @@ claude-auto-retry/
 
 ### Architecture Decisions
 
-- **PTY-hosted Claude** — Claude runs inside a `node-pty` pseudo-terminal so it gets a real TTY (full TUI), while the tool mirrors I/O and can inject the retry directly.
-- **Headless terminal emulator** — output is fed to `@xterm/headless`, giving the real rendered screen for detection instead of a noisy raw byte stream. This eliminates the foreground-process guessing and stale-frame false positives the tmux version had to work around.
-- **Anchored, tail-only error matching** — overload/safeguard detection matches Claude Code's actual `API Error` render in the last lines of the screen, never bare status numbers in scrollback (the upstream false-positive class).
-- **Event-driven when possible** — the `StopFailure` hook is the authoritative overload trigger; the anchored scraper stays active alongside it as a deduplicated safety net for renders the hook can't emit (e.g. an API 429).
+- **PTY-hosted Claude + headless emulator** — Claude runs in a `node-pty` PTY (real TTY, full TUI) while `@xterm/headless` renders the same output into a screen the tool can read. Rationale: [How it Works](#how-it-works) and [Why a PTY](#why-a-pty-not-tmux).
+- **Anchored, tail-only error matching** — overload/safeguard detection matches Claude Code's actual `API Error` render in the screen tail, never bare status numbers in scrollback (the upstream false-positive class).
+- **Event-driven when possible** — the `StopFailure` hook is the authoritative overload trigger, with the anchored scraper as a deduplicated safety net.
 - **Iterative DST correction** — timezone offset is computed via a convergence loop, not a single-shot formula that breaks at DST boundaries.
-- **Config validation** — invalid user config values fall back to safe defaults instead of producing NaN/undefined behavior.
-- **TypeScript sources, compiled only for packaging** — in a checkout the modules run directly via Node's built-in type stripping (Node >= 22.18); `tsc --noEmit` type-checks them in CI alongside ESLint and a knip dead-code scan. Installs run the same code transpiled to `dist/` by the emit-only `prepare` build, since Node won't strip types under `node_modules`.
+- **Config validation** — invalid config values fall back to safe defaults instead of producing NaN/undefined behavior.
+- **TypeScript sources, compiled only for packaging** — a checkout runs the `.ts` directly via Node's type stripping (>= 22.18); installs run `dist/` built by the emit-only `prepare` step, since Node won't strip types under `node_modules`.
 
 ### Running Tests
 

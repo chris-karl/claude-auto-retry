@@ -20,8 +20,8 @@ import { dirname, join } from 'node:path';
 const require = createRequire(import.meta.url);
 
 // Fallback cap for readScreen() when no explicit line count is passed. The live
-// monitor asks for a much smaller window (DETECTION_LINES in monitor.ts), so
-// this only bounds ad-hoc/standalone readScreen() calls.
+// monitor asks for a smaller window (CAPTURE_LINES in monitor.ts), so this only
+// bounds ad-hoc/standalone readScreen() calls.
 const DEFAULT_CAPTURE_LINES = 200;
 
 // All three exec bits (0o111). node-pty's prebuilt spawn-helper ships 0o755; we

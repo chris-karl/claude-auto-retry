@@ -205,8 +205,7 @@ export function isRateLimited(text: string, customPatterns: Array<string | RegEx
   if (customPatterns.length > 0) {
     const raw = tailLines > 0 ? all.slice(-tailLines) : all;
     const full = raw.join('\n');
-    const custom = customPatterns.map((p) => (typeof p === 'string' ? new RegExp(p, 'i') : p));
-    if (custom.some((p) => p.test(full))) return true;
+    if (toRegexes(customPatterns).some((p) => p.test(full))) return true;
   }
 
   // Backstop: a live limit prints the /usage-credits companion by the banner, so

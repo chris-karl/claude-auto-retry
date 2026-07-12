@@ -45,7 +45,9 @@ describe('loadConfig', () => {
     assert.equal(config.pollIntervalSeconds, 5);
   });
   it('filters invalid customPatterns entries', async () => {
-    const config = await loadFromRaw(JSON.stringify({ customPatterns: ["valid", 42, null, "[invalid"] }));
+    // "" compiles as a regex but matches every line, so it is dropped like the
+    // non-strings and the uncompilable "[invalid".
+    const config = await loadFromRaw(JSON.stringify({ customPatterns: ["valid", 42, null, "", "[invalid"] }));
     assert.deepEqual(config.customPatterns, ["valid"]);
   });
   it('rejects negative numbers and falls back to defaults', async () => {

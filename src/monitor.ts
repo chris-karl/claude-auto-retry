@@ -6,9 +6,9 @@ import type { StopFailureEvent } from './events.ts';
 import type { Config, OverloadConfig } from './config.ts';
 import type { Logger } from './logger.ts';
 
-// Screen capture depth. Generous (was 20): a live banner can sit ~90 lines above
-// the bottom behind a tall task widget. The detectors chrome-strip and tail-window
-// the capture themselves, so extra lines are free headroom.
+// Screen capture depth. A live banner can sit ~90 lines above the bottom behind a
+// tall task widget. The detectors chrome-strip and tail-window the capture
+// themselves, so extra lines are free headroom.
 const CAPTURE_LINES = 120;
 
 // Content-tail budget for the rate-limit detectors: a live banner sits within this

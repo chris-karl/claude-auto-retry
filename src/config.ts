@@ -112,15 +112,16 @@ function clamp(val: unknown, lo: number, hi: number, fallback: number): number {
   return Math.min(hi, Math.max(lo, val));
 }
 
-// Keep only non-empty strings that actually compile as regexes, so a typo'd
-// pattern can't crash a monitor tick.
+// A pattern is usable only if it's a non-empty string that compiles as a regex: a
+// typo can't then crash a monitor tick, and an empty string (which compiles but
+// matches every line) can't turn into a permanent false positive.
+function isUsablePattern(p: unknown): p is string {
+  if (typeof p !== 'string' || p.length === 0) return false;
+  try { new RegExp(p); return true; } catch { return false; }
+}
+
 function validPatterns(raw: unknown, fallback: string[]): string[] {
-  const pats = Array.isArray(raw)
-    ? raw.filter((p): p is string => {
-        if (typeof p !== 'string' || p.length === 0) return false;
-        try { new RegExp(p); return true; } catch { return false; }
-      })
-    : [];
+  const pats = Array.isArray(raw) ? raw.filter(isUsablePattern) : [];
   return pats.length > 0 ? pats : [...fallback];
 }
 
@@ -165,10 +166,7 @@ function validateSafeguard(raw: unknown): SafeguardConfig {
 // undefined behavior downstream.
 function validate(raw: Record<string, unknown>): Config {
   const customPatterns = Array.isArray(raw.customPatterns)
-    ? raw.customPatterns.filter((p): p is string => {
-        if (typeof p !== 'string') return false;
-        try { new RegExp(p); return true; } catch { return false; }
-      })
+    ? raw.customPatterns.filter(isUsablePattern)
     : DEFAULT_CONFIG.customPatterns;
 
   return {

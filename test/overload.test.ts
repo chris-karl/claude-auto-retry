@@ -77,6 +77,22 @@ describe('detectOverload', () => {
   it('does NOT match a "status.claude.com" mention in prose/comments', () => assert.equal(detectOverload('see status.claude.com for incidents', PATS), false));
   it('does NOT match a bare "500 Internal server error" without the API Error frame', () => assert.equal(detectOverload('500 Internal server error · try again', PATS), false));
 
+  // --- Self-referential: the phrase patterns must not fire when merely quoted or
+  //     discussed in the session (a conversation explaining this tool, or about API
+  //     errors). The real render always carries an `API Error` line nearby. ---
+  it('does NOT match "temporarily limiting requests" in prose (no API Error nearby)', () => {
+    assert.equal(detectOverload('the "temporarily limiting requests" pattern is a built-in overload signal', PATS), false);
+  });
+  it('does NOT match a quoted "overloaded_error" in prose (no API Error nearby)', () => {
+    assert.equal(detectOverload('the overloaded_error JSON type is what we anchor on', PATS), false);
+  });
+  it('still matches the real API-429 render (API Error on the line)', () => {
+    assert.equal(detectOverload('● API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited', PATS), true);
+  });
+  it('still matches a multi-line overloaded_error body (API Error one line up)', () => {
+    assert.equal(detectOverload('API Error: 529\n{"type":"error","error":{"type":"overloaded_error"}}', PATS), true);
+  });
+
   // --- Tail-anchoring: an error that has scrolled up out of the live tail is no
   //     longer terminal (clean tail, an old status code sitting up in scrollback). ---
   it('does NOT match an API error buried above the 12-line tail', () => {
@@ -85,6 +101,23 @@ describe('detectOverload', () => {
   });
   it('matches an API error sitting in the live tail', () => {
     const screen = ['some earlier output', 'more output', 'API Error: 529 Overloaded'].join('\n');
+    assert.equal(detectOverload(screen, PATS), true);
+  });
+
+  // --- Raw-distance bound: chrome-stripping lets the tail reach past a tall widget,
+  //     but for the overload path anything reachable ONLY that way is stale
+  //     scrollback, not a live terminal error (which sits just above the input box). ---
+  it('does NOT match an API error buried >20 raw lines up behind a tall chrome widget', () => {
+    const screen = [
+      'API Error: 529 Overloaded',
+      '  20 tasks (0 done, 20 open)',
+      ...Array(22).fill('  □ pending task'),
+      '───────────────', '❯ ',
+    ].join('\n');
+    assert.equal(detectOverload(screen, PATS), false);
+  });
+  it('still matches a terminal API error just above the input box', () => {
+    const screen = ['API Error: 529 Overloaded', '───────────────', '❯ ', '───────────────', '  ⏵⏵ auto mode on'].join('\n');
     assert.equal(detectOverload(screen, PATS), true);
   });
 });
@@ -321,7 +354,6 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
     const st = createMonitorState();
     const r = await processOneTick(st, s, cfg(), () => true, NO_JITTER);
     assert.equal(r, 'overload-detected');
-    assert.equal(st.eventMode, true);    // latched
     assert.equal(st.viaEvent, true);
     assert.equal(s._cleared, true);      // marker consumed
     assert.equal(s._sent.length, 0);     // no send yet — backoff first
@@ -367,29 +399,55 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
     assert.equal(s._sent.length, 0);
   });
 
-  it('consumes-and-ignores a non-retryable marker (e.g. rate_limit from an outdated hook) without latching eventMode', async () => {
+  it('consumes-and-ignores a non-retryable marker (e.g. rate_limit from an outdated hook)', async () => {
     // Regression (upstream #31): settings.json freezes the hook's cli path + matcher at
     // install time, so an old hook binary can still write rate_limit markers after an
-    // upgrade. The monitor must not enter overload backoff off it, and must NOT latch
-    // eventMode (that would disable the scraper path off a misclassified event).
+    // upgrade. The monitor must not enter overload backoff off it — just consume it so
+    // it can't re-fire (the scraper still gets its normal shot on the next tick).
     for (const bad of ['rate_limit', 'billing_error', 'invalid_request']) {
       const s = mockScreen('idle prompt', { event: makeEvent(bad) });
       const st = createMonitorState();
       const r = await processOneTick(st, s, cfg(), () => true, NO_JITTER);
       assert.equal(r, 'event-ignored', bad);
-      assert.equal(st.eventMode, false, bad);   // NOT latched
       assert.equal(st.status, 'monitoring', bad);
       assert.equal(s._cleared, true, bad);      // consumed so it can't re-fire
       assert.equal(s._sent.length, 0, bad);
     }
   });
 
-  it('once eventMode is latched, the scraper path is disabled', async () => {
-    const s = mockScreen('API Error: 529 Overloaded');  // scraper WOULD match
+  // A transient API 429 emits no retryable marker, so only the scraper can catch
+  // it — it must stay active after the hook has fired (it used to be permanently
+  // disabled by the first marker, leaving a stuck 429 unretried).
+  it('keeps the overload scraper active after the hook has fired (429 with no marker is still retried)', async () => {
     const st = createMonitorState();
-    st.eventMode = true;
-    assert.equal(await processOneTick(st, s, cfg(), () => true, NO_JITTER), 'monitoring');
-    assert.equal(s._sent.length, 0);
+    // 1. A retryable StopFailure fires — the hook is now known live for this session.
+    const s1 = mockScreen('idle prompt', { event: makeEvent('server_error') });
+    assert.equal(await processOneTick(st, s1, cfg(), () => true, NO_JITTER), 'overload-detected');
+    st.status = 'monitoring';  // recovered from that incident, back to watching
+    // 2. Later, a transient API 429 the event path can't emit (no marker) appears.
+    const render = '● API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited\n\n✻ Cogitated for 37s\n\n❯ ';
+    const s2 = mockScreen(render);
+    assert.equal(await processOneTick(st, s2, cfg(), () => true, NO_JITTER), 'overload-detected');
+    assert.equal(st.status, 'overload');
+  });
+
+  // After a viaEvent retry the banner is often still on screen (edge-triggered — no
+  // clear-check); the scraper must not re-detect it and open a second backoff.
+  it('does not re-fire the scraper on the same banner lingering after a viaEvent retry', async () => {
+    const banner = 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}';
+    const st = createMonitorState();
+    // in a viaEvent backoff whose window just elapsed, the banner still rendered
+    st.status = 'overload'; st.viaEvent = true; st.overloadWaitUntil = Date.now() - 1; st.overloadTotalWaitMs = 30_000;
+    const s1 = mockScreen(banner);
+    assert.equal(await processOneTick(st, s1, cfg(), () => true, NO_JITTER), 'overload-retried'); // send #1
+    assert.equal(st.status, 'monitoring');
+    assert.equal(s1._sent.length, 1);
+    assert.equal(st.overloadAttempts, 1);
+    // next tick: same banner still present, no new marker → scraper must NOT re-detect it
+    const s2 = mockScreen(banner);
+    assert.equal(await processOneTick(st, s2, cfg(), () => true, NO_JITTER), 'monitoring');
+    assert.equal(s2._sent.length, 0);         // no second injection
+    assert.equal(st.overloadAttempts, 1);     // give-up budget not reset
   });
 
   it('works without event plumbing (adapter without readEvent falls back to the scraper)', async () => {

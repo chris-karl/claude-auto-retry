@@ -5,6 +5,56 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+This release ports the applicable upstream work through `v0.6.0` (upstream) onto
+the fork's PTY architecture. Upstream's tmux-only features (the `reconcile` /
+`install-timer` monitor-coverage machinery, the tmux status-bar indicator, and
+their systemd/launchd units) are intentionally not ported: the fork's monitor
+lives in the launcher process and dies with it, so there is nothing to re-arm
+and no tmux status bar to feed.
+
+### Added
+- **Chrome-aware detection** (upstream PR #34/#38): Claude Code renders UI
+  chrome (input box, footer, task widget, spinner, hints) below the meaningful
+  content, so a live limit banner behind a tall widget could sit outside the
+  fixed detection tail and go unretried. Detectors now strip trailing chrome
+  first and measure the tail in content lines; the monitor captures 120 lines
+  (was 20). A `/usage-credits` companion backstop catches banners behind
+  unrecognized chrome, with the same liveness discipline as the main path. The
+  overload/safeguard tail is additionally capped at 20 raw lines.
+- `CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER` (upstream #47): prefix the interactive
+  `claude` launch with a wrapper command, e.g. `caffeinate -i` on macOS.
+- "Waiting for N background agents to finish" counts as working, so a stale
+  banner above a session blocked on a subagent is never acted on.
+
+### Changed
+- The overload scraper stays active alongside the StopFailure event path
+  instead of being disabled by the first marker: the hook can't emit some
+  terminal renders (an API 429 "temporarily limiting requests"), which were
+  never retried once event mode latched. Scraper and event path are
+  deduplicated per banner so they never act on the same incident twice.
+- Limit detection is no longer gated on the session being idle — the working
+  patterns can match transcript text ("Retrying in …", "attempt N/M" in a
+  flaky deploy log), which could suppress detection entirely. Injection is
+  still gated: nothing is ever sent into a working session.
+
+### Fixed
+- A reset time that had just passed (the monitor can settle on a banner minutes
+  after the reset) no longer rolls a full day forward and parks the session
+  ~24h; within a one-hour grace window the retry is prompt. For an ambiguous
+  clock with both readings past, the roll targets the earliest occurrence, not
+  the pm one ~12h later.
+- Out-of-range reset clocks ("resets 30") are rejected instead of computing a
+  nonsense wait, and an ambiguous hour of 12 rolls to midnight instead of
+  "hour 24" (the wrong day for date-pinned weekly resets).
+- Overload phrase patterns ("temporarily limiting requests",
+  "overloaded_error") require an `API Error` line nearby, so quoting or
+  discussing them in a session can't trigger a retry.
+- The waiting countdown ends as soon as the session resumes working (upstream
+  #39), so a manually-continued session isn't parked blind on a stale timer
+  that would mask the next genuine limit.
+
 ## [0.6.0] - 2026-07-06
 
 This release unifies two lines of development: the upstream (tmux-based) feature

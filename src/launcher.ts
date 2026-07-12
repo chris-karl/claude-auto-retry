@@ -25,6 +25,21 @@ function isPrintMode(args: string[]): boolean {
   return args.includes('-p') || args.includes('--print');
 }
 
+// Optional launch wrapper. Set CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER to a prefix command
+// (e.g. "caffeinate -i" on macOS to keep the machine awake, or "nice") and it is
+// prepended to the claude invocation: `<wrapper> <claudeBin> <args…>`. Unset/blank
+// spawns claude directly (unchanged default).
+export function resolveLaunchCommand(
+  claudeBin: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): { cmd: string; cmdArgs: string[] } {
+  const wrapper = (env.CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER || '').trim();
+  if (!wrapper) return { cmd: claudeBin, cmdArgs: args };
+  const toks = wrapper.split(/\s+/);
+  return { cmd: toks[0], cmdArgs: [...toks.slice(1), claudeBin, ...args] };
+}
+
 // Current terminal size, with sane fallbacks when stdout is not a TTY.
 function termSize(): { cols: number; rows: number } {
   return { cols: process.stdout.columns || 80, rows: process.stdout.rows || 30 };
@@ -70,7 +85,8 @@ async function launchInteractive(args: string[]): Promise<number> {
   let term, child;
   try {
     term = await createTerminal(cols, rows);
-    child = await spawnPty(claudeBin, args, {
+    const { cmd, cmdArgs } = resolveLaunchCommand(claudeBin, args);
+    child = await spawnPty(cmd, cmdArgs, {
       cols, rows,
       cwd: process.cwd(),
       env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1', CLAUDE_AUTO_RETRY_SESSION: sessionKey },
@@ -184,7 +200,8 @@ async function launchInteractive(args: string[]): Promise<number> {
 // Last-resort fallback if the PTY can't be created: run claude directly with
 // inherited stdio. No monitoring, but the user still gets a working session.
 function runPlain(claudeBin: string, args: string[]): Promise<number> {
-  const claude = spawn(claudeBin, args, {
+  const { cmd, cmdArgs } = resolveLaunchCommand(claudeBin, args);
+  const claude = spawn(cmd, cmdArgs, {
     stdio: 'inherit',
     env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1' },
   });
@@ -257,13 +274,16 @@ async function launchPrintMode(args: string[]): Promise<number> {
   }
 }
 
-// Main. Set process.exitCode rather than calling process.exit(): exit() would
-// tear down the event loop before buffered (non-TTY) writes flush. Letting the
-// loop drain naturally exits with the right code without truncating output.
-const args = process.argv.slice(2);
+// Main — only when executed directly (`node launcher.ts …`), never when imported
+// for its exported helpers (tests). Set process.exitCode rather than calling
+// process.exit(): exit() would tear down the event loop before buffered (non-TTY)
+// writes flush, truncating output.
+if (/[/\\]launcher\.(ts|js)$/.test(process.argv[1] ?? '')) {
+  const args = process.argv.slice(2);
 
-if (isPrintMode(args)) {
-  process.exitCode = await launchPrintMode(args);
-} else {
-  process.exitCode = await launchInteractive(args);
+  if (isPrintMode(args)) {
+    process.exitCode = await launchPrintMode(args);
+  } else {
+    process.exitCode = await launchInteractive(args);
+  }
 }

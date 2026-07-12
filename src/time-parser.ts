@@ -53,11 +53,16 @@ function parseDatedReset(text: string): ParsedReset | null {
   if (t) {
     hour = parseInt(t[1], 10);
     minute = t[2] ? parseInt(t[2], 10) : 0;
-    const ampm = t[3] ? t[3].toLowerCase() : null;
-    if (ampm === 'pm' && hour !== 12) hour += 12;
-    else if (ampm === 'am' && hour === 12) hour = 0;
-    // No am/pm on a 1-12 hour is ambiguous; a 24-hour value (>=13, or 0) is taken as-is.
-    else if (!ampm && hour >= 1 && hour <= 12) ambiguous = true;
+    // An out-of-range clock (a stray number the regex grabbed) is no clock at all —
+    // keep the (valid) date and fall back to midnight rather than a nonsense time.
+    if (hour > 23 || minute > 59) { hour = 0; minute = 0; }
+    else {
+      const ampm = t[3] ? t[3].toLowerCase() : null;
+      if (ampm === 'pm' && hour !== 12) hour += 12;
+      else if (ampm === 'am' && hour === 12) hour = 0;
+      // No am/pm on a 1-12 hour is ambiguous; a 24-hour value (>=13, or 0) is taken as-is.
+      else if (!ampm && hour >= 1 && hour <= 12) ambiguous = true;
+    }
   }
   return { hasDate: true, month, day, hour, minute, timezone: tzMatch ? tzMatch[1] : null, ambiguous };
 }
@@ -78,6 +83,10 @@ export function parseResetTime(text: string): ParsedReset | null {
     if (ampm === 'pm' && hour !== 12) hour += 12;
     if (ampm === 'am' && hour === 12) hour = 0;
 
+    // Reject an out-of-range clock (e.g. a bare "resets 30"): a bad hour/minute
+    // would silently compute a nonsense wait. null → fallback.
+    if (hour > 23 || hour < 0 || minute > 59) return null;
+
     const ambiguous = !ampm && hour >= 1 && hour <= 12;
     return { hour, minute, timezone, ambiguous };
   }
@@ -93,6 +102,17 @@ export function parseResetTime(text: string): ParsedReset | null {
   }
 
   return null;
+}
+
+// Reset-boundary grace window: a parsed reset time in the recent PAST almost always
+// means the reset just happened (the monitor can settle on the banner well after it),
+// so retry promptly (wait = margin) instead of rolling a full day forward and parking
+// the session ~24h. Only a reset further back plausibly means tomorrow.
+const RESET_GRACE_MS = 60 * 60 * 1000; // 1 hour
+
+function rollPastReset(diffMs: number): number {
+  if (diffMs >= 0) return diffMs;
+  return diffMs > -RESET_GRACE_MS ? 0 : diffMs + 86400_000;
 }
 
 export function calculateWaitMs(
@@ -187,7 +207,7 @@ export function calculateWaitMs(
     // future one. If neither is future (a stale banner), fall back to the most
     // recent → wait ≈ 0.
     const candidates = parsed.ambiguous
-      ? [datedCandidate(hour, minute), datedCandidate(hour + 12, minute)]
+      ? [datedCandidate(hour, minute), datedCandidate((hour + 12) % 24, minute)]  // %24: 12 → 0, not next-day 24
       : [datedCandidate(hour, minute)];
     const future = candidates.filter((c) => c > now.getTime());
     const chosen = future.length ? Math.min(...future) : Math.max(...candidates);
@@ -196,7 +216,7 @@ export function calculateWaitMs(
 
   if (parsed.ambiguous) {
     const t1 = getTargetTimestamp(hour, minute);
-    const t2 = getTargetTimestamp(hour + 12, minute);
+    const t2 = getTargetTimestamp((hour + 12) % 24, minute);  // %24: 12 → 0 (midnight), never hour 24
     const d1 = t1 - now.getTime();
     const d2 = t2 - now.getTime();
 
@@ -204,13 +224,18 @@ export function calculateWaitMs(
     if (d1 > 0 && d2 > 0) target = Math.min(d1, d2);
     else if (d1 > 0) target = d1;
     else if (d2 > 0) target = d2;
-    else target = d1 + 86400_000; // tomorrow
+    else {
+      // Both interpretations are past. Grace-check the MOST RECENT one (just passed?);
+      // if rolling to tomorrow, roll the EARLIEST occurrence forward (t1 < t2 always),
+      // not the later pm one — otherwise we wait ~12h longer than necessary.
+      const recent = Math.max(d1, d2);
+      target = recent > -RESET_GRACE_MS ? 0 : Math.min(d1, d2) + 86400_000;
+    }
 
     return Math.max(0, target) + marginSeconds * 1000;
   }
 
-  let diff = getTargetTimestamp(hour, minute) - now.getTime();
-  if (diff < 0) diff += 86400_000; // tomorrow
+  const diff = rollPastReset(getTargetTimestamp(hour, minute) - now.getTime());
 
   return diff + marginSeconds * 1000;
 }

@@ -70,12 +70,13 @@ move is to stop using the scrape as the *trigger*.
 marker under `~/.claude-auto-retry/events/` for the transient-overload error types
 (`overloaded|server_error` — `rate_limit` is deliberately excluded: it is the hours-scale
 session/usage limit, owned by the scraper usage path; see src/events.js). The monitor
-reads the marker for its own pane
-each tick; the first marker latches `eventMode`, which disables the scraper for that
-session. Edge-triggered: one backoff-then-send per failure, then back to monitoring;
-self-recovery and foreground/shell gates still apply; the cumulative cap is shared with
-the scraper path. The scraper remains the fallback until a marker is ever seen (hook
-absent, pre-`v0.4.0` session without the pane env, or non-tmux).
+reads the marker for its own pane each tick. Edge-triggered: one backoff-then-send per
+failure, then back to monitoring; self-recovery gates still apply; the cumulative cap is
+shared with the scraper path. The scraper stays active alongside the event path (it is
+NOT disabled once a marker is seen): the event path only covers overloaded/server_error,
+so a transient render the hook can't emit (an API 429, "temporarily limiting requests")
+is still caught by the scraper — deduplicated against the banner an event-path retry
+just handled, so the same uncleared render can't open a second backoff.
 
 **Correlation correction (learned during build):** the original plan resolved the
 session via `/proc/<pid>/environ` → `CLAUDE_CODE_SESSION_ID`. In practice the *main*

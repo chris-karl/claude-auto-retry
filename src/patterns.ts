@@ -18,6 +18,68 @@ export function stripAnsi(text: string): string {
     .replace(CSI_REGEX, '');
 }
 
+const screenLines = (text: string): string[] => stripAnsi(text).split('\n');
+
+// Companion line under a LIVE limit banner ("… /usage-credits to finish …").
+// Doubles as chrome furniture and as the live-limit backstop signal below.
+const USAGE_CREDITS = /\/usage-credits\b/i;
+
+// Claude is mid-flight (streaming, or running its OWN internal API retry) — the
+// screen is not in a terminal state and must not be acted on. (The limit menu
+// shows "Esc to cancel", not "esc to interrupt", so no collision.) Defined up
+// here because isChromeLine must never strip a live working footer.
+const WORKING_PATTERNS: RegExp[] = [
+  /esc to interrupt/i,        // the working/streaming footer ("… (esc to interrupt)")
+  /\besc\b.*\binterrupt\b/i,  // tolerate reordering/spacing in the same footer
+  /Retrying in\b/i,           // internal-retry suffix — retries not yet exhausted
+  /\battempt\s+\d+\/\d+/i,    // "attempt 3/10" companion to the retry suffix
+  // Blocked awaiting a subagent = working. Live-only render (gone the moment the
+  // agent finishes) — the lingering "Backgrounded agent" transcript notice is NOT
+  // working, or an idle limited session would never be retried.
+  /waiting for \d+ background agents? to finish/i,
+];
+const isWorkingLine = (l: string): boolean => WORKING_PATTERNS.some((p) => p.test(l));
+
+// --- Chrome-aware tail ---
+// Claude Code renders UI chrome (input box, footer, task widget, spinner, hints)
+// BELOW the content, so a tall widget pushes a live banner far up the screen and a
+// fixed last-N-lines tail scrolls right past it. Stripping trailing chrome first
+// makes the tail measure distance in CONTENT lines. Each entry must be anchored to
+// the actual render, not a bare glyph: wrongly stripping content pulls a stale
+// scrollback banner back into the window (a false retry).
+const CHROME_LINE: RegExp[] = [
+  /^\s*$/,                                // blank
+  /^[\s─│╭╮╰╯┌┐└┘├┤┬┴┼▏▕|]+$/,             // box-drawing / rules
+  /^\s*│\s*[>❯][^│]*│\s*$/,                // boxed input row "│ > … │" — needs the prompt glyph,
+                                           // and [^│] rejects psql/duf table rows (content)
+  /^\s*[❯>]\s*$/,                          // empty input prompt (bare, unboxed)
+  /^\s*⏵⏵/,                                // mode footer ("⏵⏵ auto mode on…")
+  /Allowed by auto mode/i,                // permission notice (bare "auto mode" matches prose)
+  /shift\+tab to (?:cycle|select)/i,      // tab-cycle footer hint
+  /^\s*\?\s+for shortcuts\b/i,             // "? for shortcuts" footer hint
+  /\|\s*v\d+\.\d+\.\d+\b/,                 // footer version segment ("… | v2.1.201"), pipe-anchored
+  /^\s+[□◻■◼▢▪◽◾✓✔☐☑]\s+\S/,                // INDENTED todo items (flush-left "✓ Fixed…" is content)
+  /^\s*\d+\s+tasks?\s+\(/i,                 // task widget header — the "(" rejects prose
+  /^\s*…\s*\+\d+\b/,                       // "… +N completed"
+  /\/clear to save/i,                     // "new task? /clear to save …" hint
+  USAGE_CREDITS,                           // live-limit companion hint (shared w/ the backstop)
+  /^\s*[✻✢✽✳✴✶✷]\s/,                       // status spinner ("✻ Brewed for …")
+  /Backgrounded agent \(|to manage · /i,   // background-agent notice — the "(" rejects prose
+];
+// A live working footer ("✻ Cogitating… (esc to interrupt)") matches the spinner
+// glyph pattern, so exclude working lines — they are content, never furniture.
+const isChromeLine = (l: string): boolean => !isWorkingLine(l) && CHROME_LINE.some((r) => r.test(l));
+
+// Last `n` lines AFTER dropping trailing chrome. maxRaw additionally caps the reach
+// above the raw bottom — the overload path uses it because anything reachable only
+// past a tall widget is stale scrollback, not a live error.
+function contentTail(lines: string[], n: number, maxRaw = Infinity): string[] {
+  let end = lines.length;
+  while (end > 0 && isChromeLine(lines[end - 1])) end--;
+  const start = Math.max(0, end - n, lines.length - maxRaw);
+  return lines.slice(start, end);
+}
+
 // Claude Code renders rate limits across multiple lines in its TUI, e.g.:
 //   "⚠ You've hit your limit"
 //   "· resets 3pm (UTC)"
@@ -72,45 +134,38 @@ const MENU_LIMIT_MARKERS: RegExp[] = [
   /Adjust monthly spend limit/i,
 ];
 
-// Tail-anchored like the overload path: a LIVE menu sits at the bottom of the
-// screen, while the same text higher in the capture is quoted content (a
-// conversation about limits, this repo's own tests/README under edit) and must
-// not drive Escape + retry injection into a live session.
+// Tail-anchored: a LIVE menu sits at the bottom of the screen, while the same
+// text higher up is quoted content and must not drive Escape + retry injection.
+// Chrome-aware so a menu pushed up by a tall widget is still seen (menu lines are
+// not chrome, so contentTail keeps them); no raw bound.
 export function isLimitMenuPrompt(text: string): boolean {
-  const t = tail(text).join('\n');
+  const t = contentTail(screenLines(text), TAIL_LINES).join('\n');
   if (!/What do you want to do\?/i.test(t)) return false;
   return MENU_LIMIT_MARKERS.some((p) => p.test(t));
 }
 
-// Indicators that Claude is mid-flight (thinking/streaming or running its OWN
-// internal API retry). While any of these shows, the screen is NOT in a terminal
-// state: a rate-limit banner lingering above is stale, and an overload error
-// still carries Claude's own backoff ("API Error (529 …) · Retrying in 5s ·
-// attempt 3/10") — acting on it would interrupt that backoff. (The limit menu
-// shows "Esc to cancel", not "esc to interrupt", so this never collides with
-// menu detection.)
-const WORKING_PATTERNS: RegExp[] = [
-  /esc to interrupt/i,        // the working/streaming footer ("… (esc to interrupt)")
-  /\besc\b.*\binterrupt\b/i,  // tolerate reordering/spacing in the same footer
-  /Retrying in\b/i,           // internal-retry suffix — retries not yet exhausted
-  /\battempt\s+\d+\/\d+/i,    // "attempt 3/10" companion to the retry suffix
-];
-
+// Chrome-aware so isWorking measures the SAME bottom as the detectors — a live
+// working footer above a tall chrome stack was invisible to a raw tail while the
+// chrome-aware detectors still saw a lingering banner, letting retry text land in
+// a mid-flight session.
 export function isWorking(text: string): boolean {
-  const lines = tail(text);
-  return lines.some((line) => WORKING_PATTERNS.some((p) => p.test(line)));
+  return contentTail(screenLines(text), TAIL_LINES).some(isWorkingLine);
 }
 
-// --- Tail anchoring (shared by isWorking and the overload path) ---
+// --- Tail anchoring (shared by the overload and safeguard paths) ---
 // A *terminal* error or live status footer is the last thing on screen, sitting
 // just above the input box (~5-6 variable lines: box borders + input row(s) +
 // footer). A multi-line JSON error body adds a few more, so its anchor line can
-// land ~10 rows from the bottom. 12 covers that with margin while still trimming
-// the top of the capture, where stale scrollback lives.
+// land ~10 rows from the bottom. 12 content lines cover that with margin while
+// still trimming the top of the capture, where stale scrollback lives.
 const TAIL_LINES = 12;
+// Raw-distance cap: an error only reachable by chrome-stripping past a tall widget
+// is stale scrollback, not a live terminal error. (The limit path has no such
+// bound — its banner is pinned by the reset time.)
+const OVERLOAD_MAX_RAW_LINES = 20;
 
 function tail(text: string): string[] {
-  return stripAnsi(text).split('\n').slice(-TAIL_LINES);
+  return contentTail(screenLines(text), TAIL_LINES, OVERLOAD_MAX_RAW_LINES);
 }
 
 // Compile a config pattern (string → case-insensitive RegExp) once per call.
@@ -137,14 +192,36 @@ function hasNearbyMatch(lines: string[], idx: number, patterns: RegExp[]): boole
   return false;
 }
 
-export function isRateLimited(text: string, customPatterns: Array<string | RegExp> = []): boolean {
-  const lines = stripAnsi(text).split('\n');
+// tailLines > 0 restricts detection to the last N CONTENT lines (chrome-aware): a
+// live banner sits at the prompt, while the same words higher up are quoted
+// scrollback and must not drive a retry. 0 = scan everything (print mode).
+export function isRateLimited(text: string, customPatterns: Array<string | RegExp> = [], tailLines = 0): boolean {
+  const all = screenLines(text);
+  const lines = tailLines > 0 ? contentTail(all, tailLines) : all;
 
-  // Custom patterns: check full text (the user controls their own regex).
+  // Custom patterns test the RAW tail, not the chrome-stripped window: a pattern
+  // keyed on footer text must still fire even though the built-in path strips the
+  // footer as furniture. Same tailLines bound.
   if (customPatterns.length > 0) {
-    const full = lines.join('\n');
+    const raw = tailLines > 0 ? all.slice(-tailLines) : all;
+    const full = raw.join('\n');
     const custom = customPatterns.map((p) => (typeof p === 'string' ? new RegExp(p, 'i') : p));
     if (custom.some((p) => p.test(full))) return true;
+  }
+
+  // Backstop: a live limit prints the /usage-credits companion by the banner, so
+  // companion + a reset line nearby catches a banner behind chrome the allowlist
+  // doesn't recognize. Same liveness discipline as the main path: trusted only with
+  // nothing but chrome below it (a resumed session's scrollback has real work under
+  // the stale companion), and a reset line is required (a session merely explaining
+  // /usage-credits has none).
+  if (tailLines > 0) {
+    const companionIdx = all.findLastIndex((l) => USAGE_CREDITS.test(l));
+    if (companionIdx !== -1
+        && all.slice(companionIdx + 1).every(isChromeLine)
+        && hasNearbyMatch(all, companionIdx, RESET_PATTERNS)) {
+      return true;
+    }
   }
 
   // Find a "limit" line with a "resets" line nearby (works for single-line and
@@ -161,7 +238,7 @@ export function isRateLimited(text: string, customPatterns: Array<string | RegEx
 }
 
 export function findRateLimitMessage(text: string): string | null {
-  const lines = stripAnsi(text).split('\n');
+  const lines = screenLines(text);
 
   // Scan bottom-up so the most-recent reset line wins. Claude Code never clears
   // earlier banners from scrollback, so a stale "resets 11:30am" can linger
@@ -198,20 +275,32 @@ export interface PatternMatch {
   line: string;
 }
 
-// Returns { pattern, line } for the first overload pattern matching a tail line,
-// else null. Per-line (not whole-tail) so we can report WHICH line tripped it —
-// invaluable for diagnosing a future false positive.
-export function overloadMatch(text: string, patterns: Array<string | RegExp> = []): PatternMatch | null {
+// Both a real overload and a real safeguard flag always render as an `API Error:`
+// line; requiring one near the matched pattern keeps the phrases ("temporarily
+// limiting requests", "overloaded_error", the AUP link) from firing when they are
+// merely quoted or discussed in the session.
+const API_ERROR_ANCHOR: RegExp[] = [/\bAPI Error\b/i];
+
+// Returns { pattern, line } for the first pattern matching a tail line with an
+// `API Error` line nearby, else null. Per-line so the log can report WHICH line
+// tripped it — invaluable for diagnosing a future false positive.
+function apiErrorAnchoredMatch(text: string, patterns: Array<string | RegExp>): PatternMatch | null {
   if (!patterns || patterns.length === 0) return null;
   const lines = tail(text);
   if (!lines.join('').trim()) return null;
   const regexes = toRegexes(patterns);
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
     for (const r of regexes) {
-      if (r.test(line)) return { pattern: r.source, line: line.trim().slice(0, 200) };
+      if (r.test(lines[i]) && hasNearbyMatch(lines, i, API_ERROR_ANCHOR)) {
+        return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
+      }
     }
   }
   return null;
+}
+
+export function overloadMatch(text: string, patterns: Array<string | RegExp> = []): PatternMatch | null {
+  return apiErrorAnchoredMatch(text, patterns);
 }
 
 export function detectOverload(text: string, patterns: Array<string | RegExp> = []): boolean {
@@ -226,26 +315,9 @@ export function detectOverload(text: string, patterns: Array<string | RegExp> = 
 //     can't respond to this request with <model>.
 //     Double press esc to edit your last message, or try a different model with /model.
 // Because the flag is semi-random, an immediate re-send frequently clears it — but it
-// must be capped so a *sticky* flag doesn't loop forever. Tail-anchored like overload.
-// Anchor: a REAL flag always renders as an `API Error:` line. Requiring it nearby (same
-// wrap-tolerant window isRateLimited uses for limit/resets pairing) keeps the phrases
-// from firing on ordinary conversation — Claude quoting the AUP link or discussing
-// safeguard errors at an idle prompt must not trigger a retry.
-const SAFEGUARD_ANCHOR: RegExp[] = [/\bAPI Error\b/i];
-
+// must be capped so a *sticky* flag doesn't loop forever.
 export function safeguardMatch(text: string, patterns: Array<string | RegExp> = []): PatternMatch | null {
-  if (!patterns || patterns.length === 0) return null;
-  const lines = tail(text);
-  if (!lines.join('').trim()) return null;
-  const regexes = toRegexes(patterns);
-  for (let i = 0; i < lines.length; i++) {
-    for (const r of regexes) {
-      if (r.test(lines[i]) && hasNearbyMatch(lines, i, SAFEGUARD_ANCHOR)) {
-        return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
-      }
-    }
-  }
-  return null;
+  return apiErrorAnchoredMatch(text, patterns);
 }
 
 export function detectSafeguard(text: string, patterns: Array<string | RegExp> = []): boolean {

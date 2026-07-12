@@ -243,6 +243,20 @@ Optional. Create `~/.claude-auto-retry.json`:
 All fields optional. Invalid values fall back to defaults automatically. The
 `overload` and `safeguard` blocks below are configured in the same file.
 
+### Launch wrapper
+
+Set `CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER` to a prefix command and it's prepended to
+each interactive session — useful for keeping a machine awake while Claude works,
+or any other per-process wrapper:
+
+```sh
+# macOS: don't sleep while a session runs
+export CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER="caffeinate -i"
+```
+
+Generic (not macOS-specific — e.g. `nice` works too). Unset or blank spawns
+`claude` directly, unchanged.
+
 ## Overload backoff
 
 Separate from subscription rate limits, the tool also detects **sustained API
@@ -262,14 +276,17 @@ paths never collide; usage limits always take precedence.
 > never interrupts Claude's own backoff.
 
 > **Anchored, tail-only matching (why it won't fire on your code).** Patterns are
-> case-insensitive **regexes** matched against only the **last 12 lines** of the
-> rendered screen — never the full scrollback. They are anchored to Claude Code's
-> `API Error: <code>` render, so a bare `503` in code you're editing
-> (`res.status(503)`), a port number, a quoted log, or a `status.claude.com` link
-> in a comment will **not** trip detection. The one residual: a live screen tail
-> that literally contains `API Error: 529` (e.g. editing this tool, or docs about
-> Claude errors) will match — set `"enabled": false` while doing that. For a
-> structured, ambiguity-free trigger see the event-driven mode below.
+> case-insensitive **regexes** matched against only the **last 12 content lines**
+> of the rendered screen (trailing UI chrome like the input box, footer, and task
+> widget is stripped first, bounded to 20 raw lines) — never the full scrollback.
+> Every match additionally requires an `API Error` line nearby, matching Claude
+> Code's actual render, so a bare `503` in code you're editing
+> (`res.status(503)`), a port number, a quoted log, a `status.claude.com` link, or
+> the phrase "temporarily limiting requests" in conversation will **not** trip
+> detection. The one residual: a live screen tail that literally contains
+> `API Error: 529` (e.g. editing this tool, or docs about Claude errors) will
+> match — set `"enabled": false` while doing that. For a structured,
+> ambiguity-free trigger see the event-driven mode below.
 
 Configured under an `overload` block (shown with its defaults):
 
@@ -291,7 +308,7 @@ Configured under an `overload` block (shown with its defaults):
 | Option | Default | Description |
 |--------|---------|-------------|
 | `enabled` | `true` | Turn the overload path on/off |
-| `patterns` | (see above) | Case-insensitive **regexes** matching a terminal overload error in the screen tail (last 12 lines) |
+| `patterns` | (see above) | Case-insensitive **regexes** matching a terminal overload error in the screen tail (last 12 content lines, near an `API Error` line) |
 | `backoffSeconds` | `[30,60,120,240,300]` | Wait before each retry; index `i` for attempt `i` |
 | `steadyStateSeconds` | `300` | Wait once the `backoffSeconds` array is exhausted |
 | `jitterPct` | `15` | ±% jitter applied to every wait (clamped 0–100) |
@@ -318,10 +335,11 @@ claude-auto-retry install-hook /path/to/config  # repeat per CLAUDE_CONFIG_DIR y
 This adds a `StopFailure` hook (matcher `overloaded|server_error`) that writes a
 session-keyed marker the monitor consumes — no screen scraping, so it cannot
 false-positive on code or scrollback. Sessions launched via the wrapper **after**
-installing the hook use it automatically; the first marker latches event mode and
-disables the scraper for that session. Sessions without the hook (or pre-install)
-fall back to the anchored scraper. Remove with `uninstall-hook`. See
-`DESIGN-NOTES.md` for the architecture.
+installing the hook use it automatically. The anchored scraper stays active
+alongside the event path as a safety net (the hook can't emit some terminal
+renders, e.g. an API 429 "temporarily limiting requests"), deduplicated so both
+never act on the same incident; sessions without the hook rely on the scraper
+alone. Remove with `uninstall-hook`. See `DESIGN-NOTES.md` for the architecture.
 
 > **Why not `rate_limit`?** The event path handles only *transient overloads*
 > (seconds-scale backoff). A `rate_limit` is the subscription **session/usage limit** —
@@ -347,7 +365,7 @@ repeats — but only up to `maxRetries` times, then **gives up loudly** (logged)
 than looping. A sticky flag means the content/model combination is genuinely blocked;
 switch models with `/model` or rephrase.
 
-Detection is tail-anchored (last 12 screen lines) like the overload path, and a match
+Detection is tail-anchored (last 12 content lines) like the overload path, and a match
 additionally requires the `API Error` render line nearby — so the phrases appearing in
 scrollback or in a conversation *about* safeguards won't trigger it.
 
@@ -566,7 +584,7 @@ claude-auto-retry/
 - **PTY-hosted Claude** — Claude runs inside a `node-pty` pseudo-terminal so it gets a real TTY (full TUI), while the tool mirrors I/O and can inject the retry directly.
 - **Headless terminal emulator** — output is fed to `@xterm/headless`, giving the real rendered screen for detection instead of a noisy raw byte stream. This eliminates the foreground-process guessing and stale-frame false positives the tmux version had to work around.
 - **Anchored, tail-only error matching** — overload/safeguard detection matches Claude Code's actual `API Error` render in the last lines of the screen, never bare status numbers in scrollback (the upstream false-positive class).
-- **Event-driven when possible** — the `StopFailure` hook supersedes scraping for overload detection; the scraper stays as the fallback.
+- **Event-driven when possible** — the `StopFailure` hook is the authoritative overload trigger; the anchored scraper stays active alongside it as a deduplicated safety net for renders the hook can't emit (e.g. an API 429).
 - **Iterative DST correction** — timezone offset is computed via a convergence loop, not a single-shot formula that breaks at DST boundaries.
 - **Config validation** — invalid user config values fall back to safe defaults instead of producing NaN/undefined behavior.
 - **TypeScript sources, compiled only for packaging** — in a checkout the modules run directly via Node's built-in type stripping (Node >= 22.18); `tsc --noEmit` type-checks them in CI alongside ESLint and a knip dead-code scan. Installs run the same code transpiled to `dist/` by the emit-only `prepare` build, since Node won't strip types under `node_modules`.

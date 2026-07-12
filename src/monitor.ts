@@ -6,12 +6,14 @@ import type { StopFailureEvent } from './events.ts';
 import type { Config, OverloadConfig } from './config.ts';
 import type { Logger } from './logger.ts';
 
-// How many lines of the rendered screen to scan for the rate-limit banner. Kept
-// small on purpose: Claude shows the banner right where it stops (just above the
-// input composer), so the recent screen is enough. A small window also reflects
-// the *current* screen and avoids re-matching a stale banner left in scrollback
-// after the user already continued.
-const DETECTION_LINES = 20;
+// Screen capture depth. Generous (was 20): a live banner can sit ~90 lines above
+// the bottom behind a tall task widget. The detectors chrome-strip and tail-window
+// the capture themselves, so extra lines are free headroom.
+const CAPTURE_LINES = 120;
+
+// Content-tail budget for the rate-limit detectors: a live banner sits within this
+// many CONTENT lines of the bottom; the same words further up are quoted scrollback.
+const RATE_LIMIT_TAIL_LINES = 12;
 
 // After exhausting retries with the banner still on screen, back off this many
 // poll intervals before re-checking, so an exhausted state idles quietly.
@@ -34,11 +36,11 @@ export interface MonitorState {
   overloadTotalWaitMs: number;
   overloadWaitUntil: number;
   lastOverloadMatch: PatternMatch | null;
-  // Event-driven overload: eventMode latches true once a StopFailure marker is ever
-  // seen (proves the hook is live → stop trusting the scraper). viaEvent marks the
-  // current backoff window as event-triggered (edge: one send per failure).
-  eventMode: boolean;
+  // viaEvent marks the current backoff window as event-triggered (edge: one send
+  // per failure). eventHandledBanner remembers the banner a viaEvent retry just
+  // handled so the always-on scraper doesn't re-detect the same uncleared render.
   viaEvent: boolean;
+  eventHandledBanner: string | null;
   lastIgnoredEventError: string | null;
   // Safeguard/AUP false-positive retry sub-state (bounded, seconds-scale).
   safeguardAttempts: number;
@@ -69,7 +71,7 @@ export function createMonitorState(): MonitorState {
   return {
     status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null, retrySent: false,
     overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0, lastOverloadMatch: null,
-    eventMode: false, viaEvent: false, lastIgnoredEventError: null,
+    viaEvent: false, eventHandledBanner: null, lastIgnoredEventError: null,
     safeguardAttempts: 0, safeguardWaitUntil: 0, safeguardGaveUp: false, lastSafeguardMatch: null,
   };
 }
@@ -92,11 +94,16 @@ export function nextOverloadWaitMs(attemptIndex: number, overload: OverloadConfi
   return applyJitter(overloadBaseWaitMs(attemptIndex, overload), overload.jitterPct, rand);
 }
 
+// Identity of an on-screen overload banner, for deduplicating the event path
+// against the scraper.
+const bannerKey = (m: PatternMatch): string => `${m.pattern} ${m.line}`;
+
 function resetOverload(state: MonitorState): void {
   state.overloadAttempts = 0;
   state.overloadTotalWaitMs = 0;
   state.overloadWaitUntil = 0;
   state.viaEvent = false;
+  state.eventHandledBanner = null;
 }
 
 function resetSafeguard(state: MonitorState): void {
@@ -147,7 +154,7 @@ export async function processOneTick(
   if (!isAlive()) return 'exit';
 
   // The patterns module strips ANSI internally, so pass the raw rendered screen through.
-  const screenText = await screen.capture(DETECTION_LINES);
+  const screenText = await screen.capture(CAPTURE_LINES);
 
   // Newer Claude Code replaces the plain banner with an interactive
   // `/rate-limit-options` menu; that counts as a rate-limit indicator too.
@@ -156,10 +163,14 @@ export async function processOneTick(
   // and the menu isn't up, a rate-limit banner still on screen is stale and an
   // API error is not yet terminal.
   const busy = isWorking(screenText);
-  const limited = menuUp || isRateLimited(screenText, config.customPatterns);
+  const limited = menuUp || isRateLimited(screenText, config.customPatterns, RATE_LIMIT_TAIL_LINES);
 
   if (state.status === 'waiting') {
-    if (Date.now() < state.waitUntil) return 'waiting';
+    // Keep counting down UNLESS the session has resumed working (the user manually
+    // continued) — otherwise the monitor sits blind on the old timer and a SECOND,
+    // genuine limit is masked until it expires (upstream #39). The resume branch
+    // below returns us to monitoring.
+    if (Date.now() < state.waitUntil && (!busy || menuUp)) return 'waiting';
     if (!isAlive()) return 'exit';
 
     // Claude is actively working again (and not blocked on the menu) — it
@@ -192,7 +203,7 @@ export async function processOneTick(
       await sleep(MENU_DISMISS_SETTLE_MS);
       // send() ends with Enter, which on a still-open menu would confirm the
       // highlighted option. Only proceed once the Escape verifiably worked.
-      if (isLimitMenuPrompt(await screen.capture(DETECTION_LINES))) {
+      if (isLimitMenuPrompt(await screen.capture(CAPTURE_LINES))) {
         state.waitUntil = Date.now() + config.retryCooldownSeconds * 1000;
         return 'menu-still-up';
       }
@@ -230,6 +241,10 @@ export async function processOneTick(
       state.overloadAttempts++;          // next failure backs off further
       state.viaEvent = false;
       state.status = 'monitoring';
+      // Remember the banner this retry handles so the always-on scraper doesn't
+      // re-detect the same, uncleared render next tick and open a second backoff.
+      const handled = overloadMatch(screenText, overload.patterns);
+      state.eventHandledBanner = handled ? bannerKey(handled) : null;
       try {
         await screen.send(overload.retryMessage);
       } catch {
@@ -239,7 +254,9 @@ export async function processOneTick(
     }
 
     // Usage-limit takes precedence: hand off to the (hours-scale) reset path.
-    if (limited && (menuUp || !busy)) {
+    // Ungated on busy, like the monitoring path — the waiting branch never
+    // injects into a working session anyway.
+    if (limited) {
       resetOverload(state);
       return enterUsageWait(state, screenText, config);
     }
@@ -285,8 +302,9 @@ export async function processOneTick(
     if (!isAlive()) return 'exit';
     const safeguard = config.safeguard;
 
-    // A usage limit appearing takes precedence.
-    if (limited && (menuUp || !busy)) {
+    // A usage limit appearing takes precedence (ungated on busy, like the
+    // monitoring path).
+    if (limited) {
       resetSafeguard(state);
       state.status = 'monitoring';
       return enterUsageWait(state, screenText, config);
@@ -332,32 +350,31 @@ export async function processOneTick(
   }
 
   // --- monitoring ---
-  // Enter waiting on a fresh limit — but ignore a banner merely lingering while
-  // Claude is actively working (unless the menu is blocking input). Usage limits
-  // (hours-scale reset) take precedence over overload (seconds-scale).
-  if (limited && (menuUp || !busy)) {
+  // Usage limits (hours-scale reset) take precedence over overload (seconds-scale).
+  // No working gate here: WORKING_PATTERNS are not all live-only ("Retrying in …"/
+  // "attempt N/M" match transcript text), so gating detection on them could suppress
+  // a real limit entirely. The waiting branch's busy gate already stops injection;
+  // the only cost is a harmless detect → wait → user-continued cycle.
+  if (limited) {
     return enterUsageWait(state, screenText, config);
   }
 
-  // Event-driven overload (authoritative; see DESIGN-NOTES §1). A StopFailure marker
-  // for this session means the turn ended in a retryable API error — no scraping, no
-  // ambiguity. Latches eventMode so the scraper path is disabled once we know the
-  // hook is live.
+  // Event-driven overload (authoritative and faster; see DESIGN-NOTES §1). A
+  // StopFailure marker means the turn ended in a retryable API error — no scraping,
+  // no ambiguity. It runs first but does NOT replace the scraper below: the event
+  // path only covers overloaded/server_error.
   if (config.overload.enabled && screen.readEvent) {
     const ev = await screen.readEvent();
     if (ev) {
-      // Consume-side guard: trust no writer. The hook entry in settings.json freezes
-      // the cli path + matcher at install time, so an OLDER hook binary (whose matcher
-      // and RETRYABLE set still include rate_limit) can keep writing markers after an
-      // upgrade. Consume-and-ignore anything non-retryable, and do NOT latch eventMode
-      // off it — a misclassified marker must not start a backoff nor disable the
-      // scraper path.
+      // Consume-side guard: trust no writer. An OLDER installed hook (whose matcher
+      // still includes rate_limit) can keep writing markers after an upgrade.
+      // Consume-and-ignore anything non-retryable — a misclassified marker must not
+      // start a backoff (the scraper still gets its shot on the next tick).
       if (!isRetryableError(ev.error)) {
         await screen.clearEvent?.();               // consume so it can't re-fire
         state.lastIgnoredEventError = ev.error;
         return 'event-ignored';
       }
-      state.eventMode = true;
       await screen.clearEvent?.();                 // consume
       if (busy) { resetOverload(state); return 'overload-cleared'; } // self-recovered
       const capMs = config.overload.maxTotalWaitMinutes * 60_000;
@@ -372,15 +389,21 @@ export async function processOneTick(
     }
   }
 
-  // Sustained-overload scraper: only while eventMode hasn't latched (hook absent or
-  // not yet fired), and only when Claude is idle (a terminal error is the last thing
-  // on screen, never mid-flight).
-  if (!state.eventMode && config.overload.enabled && !busy) {
+  // Sustained-overload scraper safety net: runs on every monitoring tick, even when
+  // the hook is live — the event path can't emit some terminal renders (an API 429,
+  // "temporarily limiting requests"). Only when Claude is idle (a terminal error is
+  // the last thing on screen, never mid-flight).
+  if (config.overload.enabled && !busy) {
     const match = overloadMatch(screenText, config.overload.patterns);
     if (match) {
+      // The banner a viaEvent retry just handled is owned by the event path until
+      // the render changes — re-firing would open a second backoff (extra injection
+      // + resetOverload defeats the give-up cap).
+      if (state.eventHandledBanner === bannerKey(match)) return 'monitoring';
       state.lastOverloadMatch = match;  // surfaced in the 'overload-detected' log line
       return enterOverload(state, config.overload, rand);
     }
+    state.eventHandledBanner = null;  // banner gone → a future match is a fresh incident
   }
 
   // Safeguard/AUP false-positive: enter a bounded, seconds-scale retry loop.

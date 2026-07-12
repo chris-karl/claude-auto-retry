@@ -21,8 +21,8 @@ const EVENTS_DIR = join(homedir(), '.claude-auto-retry', 'events');
 // usage limit — an HOURS-scale wait until a printed reset time, not a seconds-scale
 // retry. Routing it here (as upstream once did) made the monitor fire futile
 // "Continue" retries into a session-limited screen and fight the (correct) usage-wait
-// path, which reliably reads the persistent "…resets <time>" banner and waits.
-// Permanent errors (auth/billing/invalid) never retry.
+// path. A transient API 429 is caught by the overload scraper, which stays active
+// alongside the event path. Permanent errors (auth/billing/invalid) never retry.
 const RETRYABLE = new Set(['overloaded', 'server_error']);
 
 export function isRetryableError(errorType: unknown): boolean {

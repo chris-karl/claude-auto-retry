@@ -120,18 +120,61 @@ describe('processOneTick', () => {
     assert.equal(st.attempts, 0);
   });
 
-  it('ignores a stale banner that lingers while Claude is working', async () => {
-    // Banner still on the rendered screen, but Claude is actively streaming.
+  it('never injects into a working session with a lingering banner (detect → resume cycle)', async () => {
+    // Banner still on the rendered screen while Claude is actively streaming. The
+    // monitoring path detects it ungated (a working gate would let transcript text
+    // matching a WORKING_PATTERN suppress detection entirely); the waiting branch
+    // then sees the session working and returns to monitoring without sending.
     const s = mockScreen('hit your limit · resets 3pm (UTC)\n✻ Working… (8s · esc to interrupt)');
     const st = createMonitorState();
-    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'monitoring');
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
     assert.equal(st.status, 'monitoring');
+    assert.equal(s._sent.length, 0);
+  });
+  // A transcript line matching a working pattern ("Retrying in …"/"attempt N/M" in a
+  // flaky deploy/test log) must not permanently suppress detection of a live limit.
+  it('still detects a live limit when a "Retrying in / attempt" transcript line is in the tail', async () => {
+    const s = mockScreen([
+      '  ⎿  deploying… Retrying in 5s (attempt 2/3)...',
+      '  ⎿  deploy failed after 3 attempts',
+      "You've hit your session limit · resets 3pm (UTC)", '❯ ',
+    ].join('\n'));
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(st.status, 'waiting');   // NOT suppressed by the transcript over-match
+  });
+  // Counter-repro: a genuinely limited, IDLE session whose scrollback contains a
+  // finished agent's "Backgrounded agent" transcript line MUST still be retried.
+  it('still retries a limited idle session with a finished-agent transcript in scrollback', async () => {
+    const s = mockScreen([
+      '● Task(build the parser)', '  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)',
+      '● Done. The parser passes all 14 tests.',
+      "You've hit your session limit · resets 3pm (UTC)", '❯ ',
+    ].join('\n'));
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting'; st.attempts = 1;
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(s._sent.length, 1);   // NOT suppressed — the transcript line isn't "working"
   });
   it('treats Claude becoming busy mid-wait as a resume', async () => {
     const s = mockScreen('hit your limit · resets 3pm (UTC)\n✻ Working… (2s · esc to interrupt)');
     const st = createMonitorState();
     st.waitUntil = Date.now() - 1000; st.status = 'waiting';
     assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(s._sent.length, 0);
+  });
+  // While the wait timer is still counting down, a session that resumed working (the
+  // user manually continued to unstick a wrong/stale wait) must drop back to
+  // monitoring immediately — otherwise the monitor is parked blind on the old timer
+  // and never detects a SECOND, genuine limit that follows (upstream issue #39).
+  it('drops out of the wait as soon as Claude resumes working, before the timer expires', async () => {
+    const s = mockScreen('5-hour limit reached - resets 3pm (UTC)\n· Doing… (esc to interrupt)');
+    const st = createMonitorState();
+    st.status = 'waiting'; st.waitUntil = Date.now() + 60 * 60 * 1000; st.attempts = 1;
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(st.status, 'monitoring');
+    assert.equal(st.attempts, 0);
     assert.equal(s._sent.length, 0);
   });
   it('enters waiting when the interactive limit menu appears', async () => {
@@ -175,5 +218,105 @@ describe('processOneTick', () => {
     st.waitUntil = Date.now() - 1000; st.status = 'waiting';
     assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'retried');
     assert.equal(s._escaped, 0);
+  });
+
+  // --- Chrome-aware detection: a LIVE limit banner pushed far up the screen by UI
+  //     chrome (a tall task widget + input box + footer) must still be detected.
+  //     Observed live upstream: a session-limit banner ~16 lines up behind a task
+  //     list went unretried for ~54 min because a fixed 12-line tail never reached it. ---
+  it('detects a live limit banner buried behind a task widget + input box + footer', async () => {
+    const s = mockScreen([
+      '● Agent "Map LI drop-point" finished · 1m 5s',
+      "  └ You've hit your session limit · resets 2am (Europe/Zurich)",
+      "     /usage-credits to finish what you're working on.",
+      '',
+      '✻ Brewed for 54m 35s',
+      '',
+      '  8 tasks (4 done, 1 in progress, 3 open)',
+      '  ◼ FU-4(b): build + run per-order re-drive over remnant',
+      '  □ FU-4(a): cache OD inventory map per country',
+      '  □ FU-1: analyze tax-free/reverse-charge COGS netting',
+      '  □ FU-2: LI routing gap fix',
+      '  ✓ Restore sqlrun webhook for DB queries',
+      '   … +3 completed',
+      '                              new task? /clear to save 468.1k tokens',
+      '',
+      '───────────────────────────────',
+      '❯ ',
+      '───────────────────────────────',
+      '  Opus 4.8 1M | automation-monorepo@dev | 5h 100% @02:00 | v2.1.201',
+      '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents',
+    ].join('\n'));
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(st.status, 'waiting');
+  });
+  // The /usage-credits backstop must not resurrect the scrollback false positive: a
+  // resumed session shows the stale banner+companion with real work rendered below.
+  it('does NOT enter a wait via the /usage-credits backstop when real work is below it', async () => {
+    const s = mockScreen([
+      "You've hit your session limit · resets 2am (Europe/Zurich)",
+      "     /usage-credits to finish what you're working on.",
+      ...Array(15).fill('● wrote some code after resuming'),
+      '❯ ',
+    ].join('\n'));
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'monitoring');
+    assert.equal(st.status, 'monitoring');
+    assert.equal(s._sent.length, 0);
+  });
+  // A banner pushed far up by a ~90-line chrome block must still be inside the
+  // capture window. Uses a capture that honours the requested line count (the
+  // shared mockScreen ignores it).
+  it('detects a limit banner behind a ~90-line chrome block (capture window)', async () => {
+    const chrome = [
+      ...Array.from({ length: 88 }, (_, i) => `  □ task item ${i}`),
+      '   … +2 completed', '  ? for shortcuts', '  Opus 4.8 | repo@dev | v2.1.201',
+    ];
+    const full = ["You've hit your session limit · resets 4:40pm (UTC)", ...chrome].join('\n');
+    const sent: string[] = [];
+    const s: ScreenAdapter = {
+      capture: async (n) => full.split('\n').slice(-n).join('\n'),
+      send: async (t) => { sent.push(t); },
+      sendEscape: async () => {},
+    };
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(sent.length, 0);
+  });
+  // A session awaiting a subagent is progressing; a stale banner above it must not
+  // drive an injection — the waiting-branch busy gate returns user-continued instead.
+  it('does NOT inject into a session running a background agent (waiting branch gate)', async () => {
+    const s = mockScreen([
+      "You've hit your session limit · resets 3pm (Europe/Zurich)", '',
+      '● gsd:gsd-executor(Execute plan 24.1-10)', '',
+      '✻ Waiting for 1 background agent to finish', '',
+      '───────────────', '❯ ', '───────────────', '  Fable 5 | repo@dev | 5h 9% @20:00 | v2.1.202',
+    ].join('\n'));
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting'; st.attempts = 1;
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(s._sent.length, 0);
+  });
+  // isWorking and isRateLimited must measure the same bottom: a live working footer
+  // pushed up by a chrome stack was invisible to the raw-tail isWorking while the
+  // chrome-aware isRateLimited still saw a lingering banner → retry text into a
+  // mid-flight session.
+  it('does NOT re-send when Claude is working above a chrome stack (banner still lingering)', async () => {
+    const s = mockScreen([
+      "You've hit your session limit · resets 3pm (UTC)",
+      '✻ Cogitating… (12s · esc to interrupt)',
+      '  10 tasks (2 done, 1 in progress, 7 open)',
+      '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g',
+      '   … +2 completed', '  new task? /clear to save 300k tokens', '',
+      '───────────────', '❯ ', '───────────────',
+      '  Opus 4.8 | repo@dev | v2.1.201',
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+    ].join('\n'));   // working footer sits >12 raw lines above the bottom
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting'; st.attempts = 1;
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(s._sent.length, 0);
+    assert.equal(st.status, 'monitoring');
   });
 });

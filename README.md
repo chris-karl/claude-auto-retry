@@ -12,9 +12,9 @@ When Claude Code shows *"You've hit your session limit · resets 3pm"* (or the w
 
 **No workflow change. Just install and forget.**
 
-[![npm version](https://img.shields.io/npm/v/claude-auto-retry.svg)](https://www.npmjs.com/package/claude-auto-retry)
+[![Latest release](https://img.shields.io/github/v/release/chris-karl/claude-auto-retry?sort=semver&display_name=tag&label=release)](https://github.com/chris-karl/claude-auto-retry/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js >= 23.6](https://img.shields.io/badge/node-%3E%3D23.6-brightgreen.svg)](https://nodejs.org)
+[![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 
 ---
 
@@ -31,7 +31,7 @@ Claude stops. You have to wait hours, come back, and type "continue". If you're 
 ## The Solution
 
 ```bash
-npm i -g claude-auto-retry
+npm i -g chris-karl/claude-auto-retry
 claude-auto-retry install
 ```
 
@@ -43,6 +43,39 @@ That's it. Type `claude` as you always do. When the rate limit hits, the tool:
 4. Types "continue" straight into Claude
 
 You come back to find your task completed.
+
+## Installation
+
+This tool is distributed **straight from GitHub** — there is no npm-registry
+package to install. `npm` installs directly from the repository, which gives you
+latest-or-pinned installs and pairs naturally with GitHub Releases:
+
+| Intent | Command |
+|--------|---------|
+| Latest (default branch `HEAD`) | `npm i -g chris-karl/claude-auto-retry` |
+| Pin to a release tag | `npm i -g chris-karl/claude-auto-retry#v1.0.0` |
+| Pin to a commit | `npm i -g chris-karl/claude-auto-retry#<sha>` |
+| Track a branch | `npm i -g chris-karl/claude-auto-retry#main` |
+
+Then wire up the shell integration once:
+
+```bash
+claude-auto-retry install        # inject the `claude` shell wrapper
+claude-auto-retry install-hook   # optional: event-driven overload detection
+```
+
+**What happens on install.** `npm` clones the repo at your chosen ref and runs the
+package's `prepare` step, which compiles the TypeScript sources to plain
+JavaScript in `dist/` — Node refuses to strip TypeScript types under
+`node_modules`, so an installed copy must ship real `.js`. Only that compiled
+output plus the native `node-pty` dependency end up installed; there is no build
+command for you to run.
+
+**Requirements.** Node.js ≥ 20, plus — on Linux only — a C/C++ toolchain for
+`node-pty` (macOS and Windows use prebuilt binaries; see
+[Platform Support](#platform-support)). To **update**, re-run your install
+command. To **uninstall**, `npm uninstall -g claude-auto-retry` — the installed
+package keeps the name `claude-auto-retry` no matter which ref you fetched.
 
 ## How it Works
 
@@ -361,7 +394,7 @@ If you are an AI agent (Claude Code, Codex, etc.) installing this for your user,
 full setup is non-interactive:
 
 ```bash
-npm install -g claude-auto-retry
+npm install -g chris-karl/claude-auto-retry
 claude-auto-retry install        # shell wrapper
 claude-auto-retry install-hook   # recommended: event-driven, scrape-free overload detection
 ```
@@ -392,9 +425,11 @@ Notes for agents:
 
 ### Requirements
 
-- **Node.js** >= 23.6 — the tool's modules are TypeScript run directly via Node's
-  built-in type stripping (no build step), which is enabled by default from Node
-  23.6 onward.
+- **Node.js** >= 20 — an installed copy runs plain compiled JavaScript, so the
+  runtime floor is set by `node-pty` and ESM, not by TypeScript. Only working in
+  a source checkout (running the `.ts` directly, e.g. the test suite) needs
+  Node's built-in type stripping, enabled by default from Node 22.18 / 23.6
+  onward.
 - **node-pty** — installed automatically as a dependency. Ships prebuilt binaries
   for macOS and Windows; on Linux it compiles on install, which needs a C/C++
   toolchain and Python (e.g. `apt-get install -y build-essential python3`).
@@ -462,23 +497,35 @@ Contributions are welcome! Here's how to get started:
 ```bash
 git clone https://github.com/chris-karl/claude-auto-retry.git
 cd claude-auto-retry
-npm install         # builds node-pty (Linux needs build tools)
+npm install         # installs deps (Linux builds node-pty) and runs the
+                    # `prepare` build once, compiling src/ + bin/ into dist/
 npm run check       # type-check + lint + dead-code scan + tests
 ```
 
-The source is TypeScript run directly via Node's type stripping — there is no
-build step. `tsc` is used only to type-check (`--noEmit`).
-
-Then install the CLI globally from your local checkout, either way:
+Day-to-day the TypeScript runs **directly** via Node's type stripping, so no
+build is needed to iterate:
 
 ```bash
-npm link            # dev install: symlinks the global bin to this dir,
-                    # so source edits take effect with no reinstall
+node bin/cli.ts version     # run any CLI command straight from source
+npm test                    # tests import the .ts sources as-is
+```
 
-npm install -g .    # production-style install: packs this dir (per the
-                    # package.json "files" list) and installs it globally
-                    # exactly like `npm i -g claude-auto-retry` would —
-                    # a real copy, runs node-pty's build. Re-run after edits.
+A build step exists only for **packaging**: `npm run build` transpiles `src/` +
+`bin/` to `dist/` (via `tsconfig.build.json` — emit-only, so type-checking stays
+in `npm run check` and a stray type error never breaks an install), and `prepare`
+runs it automatically. Node can't strip TypeScript types under `node_modules`, so
+an installed copy must ship compiled `.js`.
+
+Then install the CLI globally from your local checkout:
+
+```bash
+npm install -g .    # packs and installs exactly like `npm i -g
+                    # chris-karl/claude-auto-retry`: builds dist/ and installs a
+                    # real copy. Re-run (or `npm run build`) after source edits.
+
+npm link            # symlinks the global bin to this checkout — but the bin is
+                    # the compiled dist/bin/cli.js, so re-run `npm run build`
+                    # after edits (or just run `node bin/cli.ts` directly).
 ```
 
 After either, run `claude-auto-retry install` to inject the shell wrapper.
@@ -497,13 +544,18 @@ claude-auto-retry/
 │   ├── pty.ts                # PTY host + headless terminal emulator (node-pty + @xterm/headless)
 │   ├── monitor.ts            # Core monitoring loop + retry logic (usage/overload/safeguard paths)
 │   ├── launcher.ts           # Process orchestration + I/O mirroring
-│   ├── postinstall.ts        # Restores node-pty spawn-helper exec bit after npm install
 │   └── wrapper.sh            # Shell function template
+├── scripts/
+│   ├── postinstall.mjs       # Restores node-pty spawn-helper exec bit after npm install
+│   └── copy-assets.mjs       # Copies wrapper.sh + package.json into dist/ during build
 ├── test/                     # Tests (node:test, *.test.ts)
-├── tsconfig.json             # Type-check config (tsc --noEmit; no build step)
+├── tsconfig.json             # Type-check config (tsc --noEmit)
+├── tsconfig.build.json       # Packaging build: emit dist/ with .ts→.js import rewrite
+├── dist/                     # Compiled JS shipped on install (git-ignored; built by `prepare`)
 ├── eslint.config.js          # ESLint flat config (typescript-eslint)
 ├── knip.json                 # Dead-code / unused-dependency config
-├── .github/workflows/ci.yml  # CI: typecheck + lint + knip + tests
+├── .github/                  # CI (run-checks.yml: typecheck + lint + knip + tests +
+│                             # packaging build) and Dependabot auto-merge/auto-release
 ├── package.json
 ├── LICENSE
 └── README.md
@@ -517,7 +569,7 @@ claude-auto-retry/
 - **Event-driven when possible** — the `StopFailure` hook supersedes scraping for overload detection; the scraper stays as the fallback.
 - **Iterative DST correction** — timezone offset is computed via a convergence loop, not a single-shot formula that breaks at DST boundaries.
 - **Config validation** — invalid user config values fall back to safe defaults instead of producing NaN/undefined behavior.
-- **TypeScript, no build step** — modules are written in TypeScript and run directly via Node's built-in type stripping (Node >= 23.6); `tsc --noEmit` type-checks them in CI alongside ESLint and a knip dead-code scan. There is no compile or `dist/` step, so what runs is exactly what's in `src/`.
+- **TypeScript sources, compiled only for packaging** — in a checkout the modules run directly via Node's built-in type stripping (Node >= 22.18); `tsc --noEmit` type-checks them in CI alongside ESLint and a knip dead-code scan. Installs run the same code transpiled to `dist/` by the emit-only `prepare` build, since Node won't strip types under `node_modules`.
 
 ### Running Tests
 

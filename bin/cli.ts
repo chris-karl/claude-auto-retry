@@ -12,7 +12,10 @@ import { writeStopFailureEvent, isRetryableError } from '../src/events.ts';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SRC_DIR = join(__dirname, '..', 'src');
-const LAUNCHER_PATH = join(SRC_DIR, 'launcher.ts');
+// Mirror our own extension: .ts next to launcher.ts in a source checkout, .js next
+// to launcher.js in a compiled install (Node won't strip types under node_modules).
+const MODULE_EXT = __filename.endsWith('.ts') ? '.ts' : '.js';
+const LAUNCHER_PATH = join(SRC_DIR, `launcher${MODULE_EXT}`);
 const WRAPPER_TEMPLATE = join(SRC_DIR, 'wrapper.sh');
 
 export const MARKER_START = '# >>> claude-auto-retry >>>';

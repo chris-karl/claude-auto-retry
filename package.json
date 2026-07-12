@@ -4,19 +4,21 @@
   "description": "Automatically retry Claude Code sessions when hitting Anthropic subscription rate limits",
   "type": "module",
   "bin": {
-    "claude-auto-retry": "./bin/cli.ts"
+    "claude-auto-retry": "./dist/bin/cli.js"
   },
   "scripts": {
+    "build": "tsc --noCheck -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "prepare": "npm run build",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "knip": "knip",
     "check": "npm run typecheck && npm run lint && npm run knip && npm test",
-    "postinstall": "node src/postinstall.ts"
+    "postinstall": "node scripts/postinstall.mjs"
   },
   "license": "MIT",
   "engines": {
-    "node": ">=23.6.0"
+    "node": ">=20"
   },
   "keywords": [
     "claude",
@@ -29,11 +31,15 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/chris-karl/claude-auto-retry"
+    "url": "git+https://github.com/chris-karl/claude-auto-retry.git"
+  },
+  "homepage": "https://github.com/chris-karl/claude-auto-retry#readme",
+  "bugs": {
+    "url": "https://github.com/chris-karl/claude-auto-retry/issues"
   },
   "files": [
-    "bin/",
-    "src/",
+    "dist/",
+    "scripts/postinstall.mjs",
     "LICENSE",
     "README.md"
   ],

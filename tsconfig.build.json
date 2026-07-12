@@ -1,0 +1,18 @@
+// Packaging build (npm `prepare`): compile the .ts sources to plain JS in dist/,
+// because an installed copy lives under node_modules where Node won't strip types.
+// `rewriteRelativeImportExtensions` rewrites `./foo.ts` specifiers to `./foo.js`.
+// EMIT-ONLY (paired with `tsc --noCheck`) — type-checking stays in `npm run check`;
+// `"types": []` drops @types/node so a git-install can't fail resolving it.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "rewriteRelativeImportExtensions": true,
+    "declaration": false,
+    "sourceMap": false,
+    "types": []
+  },
+  "include": ["src/**/*.ts", "bin/**/*.ts"]
+}

@@ -28,7 +28,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Node >= 23.6 runs .ts directly via built-in type stripping (see engines).
+        # Running the .ts sources directly needs built-in type stripping (Node >=
+        # 22.18); the engines floor (>= 20) only governs the compiled dist/ runtime.
         node-version: ['24', '26']
     name: check (node ${{ matrix.node-version }})
     steps:
@@ -60,3 +61,11 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # --ignore-scripts also skips `prepare`, so exercise the packaging path
+      # explicitly: build dist/ and run the compiled CLI a GitHub install ships.
+      - name: Build package
+        run: npm run build
+
+      - name: Smoke-test compiled CLI
+        run: node dist/bin/cli.js version

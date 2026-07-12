@@ -219,6 +219,12 @@ terminal error and not match its literal text. Tail-anchoring bounds it to the l
 lines; the escape hatch is `overload.enabled: false` while developing on the tool. §1/§2
 remove this class entirely by keying on a structured field instead of the render.
 
+The `/rate-limit-options` menu detection shares this property: its literal text
+("What do you want to do?" + a limit marker) sitting in the live tail reads as a real
+menu, and the menu path deliberately bypasses the working gate (a real menu blocks
+input, so "busy" text above it must not mask it). Tail-anchoring bounds it the same
+way; unlike overload there is no config toggle, so the bound is the only guard.
+
 ## Suggested order
 
 1. Verification spike for `StopFailure` (gates the whole §1 direction). Cheap, decisive.

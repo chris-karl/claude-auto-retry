@@ -72,10 +72,14 @@ const MENU_LIMIT_MARKERS: RegExp[] = [
   /Adjust monthly spend limit/i,
 ];
 
+// Tail-anchored like the overload path: a LIVE menu sits at the bottom of the
+// screen, while the same text higher in the capture is quoted content (a
+// conversation about limits, this repo's own tests/README under edit) and must
+// not drive Escape + retry injection into a live session.
 export function isLimitMenuPrompt(text: string): boolean {
-  const stripped = stripAnsi(text);
-  if (!/What do you want to do\?/i.test(stripped)) return false;
-  return MENU_LIMIT_MARKERS.some((p) => p.test(stripped));
+  const t = tail(text).join('\n');
+  if (!/What do you want to do\?/i.test(t)) return false;
+  return MENU_LIMIT_MARKERS.some((p) => p.test(t));
 }
 
 // Indicators that Claude is mid-flight (thinking/streaming or running its OWN

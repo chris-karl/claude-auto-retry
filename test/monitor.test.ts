@@ -133,6 +133,16 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'waiting');
     assert.ok(st.waitUntil > Date.now());
   });
+  it('ignores menu text quoted in scrollback while Claude is working', async () => {
+    // Menu text as *content* (e.g. editing this repo's tests) above a live
+    // working footer. menuUp bypasses the busy gate, so a full-capture menu
+    // match would park a live session in waiting and later inject into it.
+    const s = mockScreen([MENU, ...Array(12).fill('● unrelated output'), '✻ Working… (8s · esc to interrupt)'].join('\n'));
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'monitoring');
+    assert.equal(st.status, 'monitoring');
+    assert.equal(s._sent.length, 0);
+  });
   it('dismisses the limit menu with Escape (not Enter) before submitting the retry', async () => {
     const s = mockScreen(MENU);
     const st = createMonitorState();

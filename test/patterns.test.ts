@@ -135,6 +135,14 @@ describe('isLimitMenuPrompt', () => {
   it('ignores a generic "What do you want to do?" menu', () => {
     assert.equal(isLimitMenuPrompt('What do you want to do?\n❯ Open file\n  Close file'), false);
   });
+  it('ignores menu text quoted above the tail of the capture', () => {
+    const screen = [menu, ...Array(12).fill('● unrelated output'), '❯ '].join('\n');
+    assert.equal(isLimitMenuPrompt(screen), false);
+  });
+  it('still detects a live menu at the bottom of a tall capture', () => {
+    const screen = [...Array(12).fill('● earlier output'), menu].join('\n');
+    assert.equal(isLimitMenuPrompt(screen), true);
+  });
   it('returns false for normal output', () => {
     assert.equal(isLimitMenuPrompt('I can help you with that code'), false);
   });

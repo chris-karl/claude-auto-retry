@@ -359,7 +359,7 @@ export async function processOneTick(
     return enterUsageWait(state, screenText, config);
   }
 
-  // Event-driven overload (authoritative and faster; see DESIGN-NOTES §1). A
+  // Event-driven overload (authoritative and faster). A
   // StopFailure marker means the turn ended in a retryable API error — no scraping,
   // no ambiguity. It runs first but does NOT replace the scraper below: the event
   // path only covers overloaded/server_error.

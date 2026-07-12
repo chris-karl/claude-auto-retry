@@ -61,10 +61,7 @@ set -- \
   ':(exclude).github/' \
   ':(exclude)LICENSE' \
   ':(exclude)README.md' \
-  ':(exclude)CHANGELOG.md' \
-  ':(exclude)DESIGN-NOTES.md' \
   ':(exclude)CLAUDE.md' \
-  ':(exclude)llms.txt' \
   ':(exclude).gitignore'
 
 if [ -z "$(git diff --name-only "$last_tag"..HEAD -- "$@")" ]; then

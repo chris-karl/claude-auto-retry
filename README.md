@@ -339,7 +339,7 @@ installing the hook use it automatically. The anchored scraper stays active
 alongside the event path as a safety net (the hook can't emit some terminal
 renders, e.g. an API 429 "temporarily limiting requests"), deduplicated so both
 never act on the same incident; sessions without the hook rely on the scraper
-alone. Remove with `uninstall-hook`. See `DESIGN-NOTES.md` for the architecture.
+alone. Remove with `uninstall-hook`.
 
 > **Why not `rate_limit`?** The event path handles only *transient overloads*
 > (seconds-scale backoff). A `rate_limit` is the subscription **session/usage limit** —

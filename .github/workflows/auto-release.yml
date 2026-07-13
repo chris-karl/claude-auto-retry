@@ -57,7 +57,7 @@ jobs:
         run: .github/scripts/auto-release/bump-version.sh
 
       # The release carries nothing but the auto-generated source
-      # archives, so it is created published in one step.
+      # archives, so it is created and published in one step.
       - name: Create the release
         if: steps.decide.outputs.release == 'true'
         env:

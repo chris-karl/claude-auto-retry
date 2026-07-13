@@ -177,17 +177,10 @@ export async function processOneTick(
     if (Date.now() < state.waitUntil && (!busy || menuUp)) return 'waiting';
     if (!isAlive()) return 'exit';
 
-    // Claude is actively working again (and not blocked on the menu) — it
-    // resumed on its own. Stop waiting/re-sending against a lingering banner.
-    if (busy && !menuUp) {
-      const outcome = state.retrySent ? 'retry-succeeded' : 'user-continued';
-      state.status = 'monitoring'; state.attempts = 0; state.retrySent = false;
-      return outcome;
-    }
-
-    // Always check if the rate limit cleared FIRST — even when maxRetries is
-    // exhausted, the user (or time passing) may have resolved it.
-    if (!limited) {
+    // Claude is actively working again (and not blocked on the menu), or the
+    // rate limit cleared — checked BEFORE the maxRetries gate, since the user
+    // (or time passing) may have resolved it even when retries are exhausted.
+    if ((busy && !menuUp) || !limited) {
       const outcome = state.retrySent ? 'retry-succeeded' : 'user-continued';
       state.status = 'monitoring'; state.attempts = 0; state.retrySent = false;
       return outcome;
@@ -310,7 +303,6 @@ export async function processOneTick(
     // monitoring path).
     if (limited) {
       resetSafeguard(state);
-      state.status = 'monitoring';
       return enterUsageWait(state, screenText, config);
     }
     // In flight (our retry, or the user typing continued things). Defer WITHOUT

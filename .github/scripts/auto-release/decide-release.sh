@@ -27,6 +27,21 @@ if [ -n "${EXPECTED_COMMIT:-}" ]; then
   esac
 fi
 
+# Emit the release outputs for the next tag ($1 = bump component,
+# $2 = optional log suffix), or fail with compute-next-tag.sh's
+# ::error:: diagnostic (captured on stdout).
+emit_release() {
+  if ! next_tag=$(BUMP="$1" "$(dirname "$0")/compute-next-tag.sh"); then
+    echo "$next_tag"
+    exit 1
+  fi
+  echo "Releasing $next_tag${2:+ ($2)}"
+  {
+    echo "release=true"
+    echo "tag=$next_tag"
+  } >> "$GITHUB_OUTPUT"
+}
+
 if [ "${BUMP:-auto}" != "auto" ]; then
   # An accidental double dispatch must not cut a second release.
   released_as=$(git tag -l 'v*' --points-at HEAD)
@@ -34,16 +49,7 @@ if [ "${BUMP:-auto}" != "auto" ]; then
     echo "::error::Commit $(git rev-parse HEAD) is already released as $released_as"
     exit 1
   fi
-  if ! next_tag=$("$(dirname "$0")/compute-next-tag.sh"); then
-    # The captured output holds the ::error:: diagnostic.
-    echo "$next_tag"
-    exit 1
-  fi
-  echo "Releasing $next_tag (manually requested $BUMP bump)"
-  {
-    echo "release=true"
-    echo "tag=$next_tag"
-  } >> "$GITHUB_OUTPUT"
+  emit_release "$BUMP" "manually requested $BUMP bump"
   exit 0
 fi
 
@@ -81,13 +87,4 @@ if [ -n "$unexpected" ]; then
   echo "release=false" >> "$GITHUB_OUTPUT"
   exit 0
 fi
-if ! next_tag=$(BUMP=patch "$(dirname "$0")/compute-next-tag.sh"); then
-  # The captured output holds the ::error:: diagnostic.
-  echo "$next_tag"
-  exit 1
-fi
-echo "Releasing $next_tag"
-{
-  echo "release=true"
-  echo "tag=$next_tag"
-} >> "$GITHUB_OUTPUT"
+emit_release patch

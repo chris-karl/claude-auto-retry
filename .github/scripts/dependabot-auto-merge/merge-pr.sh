@@ -16,6 +16,8 @@ gh pr merge --squash --match-head-commit "$HEAD_SHA" "$PR"
 # before it runs, that newer commit's own run takes over.
 released_sha=$(gh api "repos/$GH_REPO/pulls/$PR" --jq '.merge_commit_sha')
 # GITHUB_TOKEN merges do not fire push triggers (recursion protection),
-# so dispatch the release explicitly once the merge has landed.
+# so dispatch the release explicitly. The pause lets the merged ref
+# propagate first: a dispatched run checking out a stale main would trip
+# the release's expected-commit guard.
 sleep 10
 gh workflow run auto-release.yml --ref main -f commit="$released_sha"

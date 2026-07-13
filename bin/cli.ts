@@ -17,13 +17,14 @@ const SRC_DIR = join(__dirname, '..', 'src');
 const MODULE_EXT = __filename.endsWith('.ts') ? '.ts' : '.js';
 const LAUNCHER_PATH = join(SRC_DIR, `launcher${MODULE_EXT}`);
 const WRAPPER_TEMPLATE = join(SRC_DIR, 'wrapper.sh');
+export const FISH_WRAPPER_TEMPLATE = join(SRC_DIR, 'wrapper.fish');
 
 export const MARKER_START = '# >>> claude-auto-retry >>>';
 export const MARKER_END = '# <<< claude-auto-retry <<<';
 
 // --- Wrapper injection ---
 
-export async function injectWrapper(rcFile: string, launcherPath: string): Promise<void> {
+export async function injectWrapper(rcFile: string, launcherPath: string, templatePath: string = WRAPPER_TEMPLATE): Promise<void> {
   let content = '';
   try {
     content = await readFile(rcFile, 'utf-8');
@@ -31,7 +32,7 @@ export async function injectWrapper(rcFile: string, launcherPath: string): Promi
     // File doesn't exist; it will be created.
   }
 
-  const template = await readFile(WRAPPER_TEMPLATE, 'utf-8');
+  const template = await readFile(templatePath, 'utf-8');
   const wrapper = template.replace(/__LAUNCHER_PATH__/g, launcherPath);
 
   // Remove an existing wrapper block if present.
@@ -88,48 +89,47 @@ async function checkPty(): Promise<boolean> {
 
 // --- CLI commands ---
 
+// Fish reads $XDG_CONFIG_HOME/fish (default ~/.config/fish). The wrapper goes
+// into config.fish, not conf.d/: conf.d files are sourced before config.fish,
+// so a `claude` alias defined there would override a conf.d function — while a
+// block appended to the end of config.fish always wins.
+function fishConfigFile(): string {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  return join(xdg || join(homedir(), '.config'), 'fish', 'config.fish');
+}
+
 async function cmdInstall(): Promise<void> {
   console.log('claude-auto-retry: installing...\n');
 
   if (await checkPty()) console.log('PTY backend OK');
 
   const shell = process.env.SHELL || '/bin/bash';
-  if (shell.includes('fish')) {
-    console.error('\nFish shell detected. Automatic install not supported.');
-    console.error('Add manually to ~/.config/fish/config.fish:');
-    console.error('  function claude');
-    console.error('    if test "$CLAUDE_AUTO_RETRY_ACTIVE" = "1"');
-    console.error('      command claude $argv');
-    console.error('      return $status');
-    console.error('    end');
-    console.error(`    env CLAUDE_AUTO_RETRY_ACTIVE=1 node "${LAUNCHER_PATH}" $argv`);
-    console.error('  end');
-    process.exit(1);
-  }
-
-  const rcFiles: string[] = [];
   const bashrc = join(homedir(), '.bashrc');
   const zshrc = join(homedir(), '.zshrc');
+  const fishrc = fishConfigFile();
 
-  if (existsSync(bashrc) || shell.includes('bash')) rcFiles.push(bashrc);
-  if (existsSync(zshrc) || shell.includes('zsh')) rcFiles.push(zshrc);
-  if (rcFiles.length === 0) rcFiles.push(bashrc);
+  const targets: Array<{ rc: string; template?: string }> = [];
+  if (existsSync(bashrc) || shell.includes('bash')) targets.push({ rc: bashrc });
+  if (existsSync(zshrc) || shell.includes('zsh')) targets.push({ rc: zshrc });
+  if (existsSync(dirname(fishrc)) || shell.includes('fish')) targets.push({ rc: fishrc, template: FISH_WRAPPER_TEMPLATE });
+  if (targets.length === 0) targets.push({ rc: bashrc });
 
-  for (const rc of rcFiles) {
-    await injectWrapper(rc, LAUNCHER_PATH);
+  for (const { rc, template } of targets) {
+    await mkdir(dirname(rc), { recursive: true });
+    await injectWrapper(rc, LAUNCHER_PATH, template);
     console.log(`Shell function added to ${rc}`);
   }
 
   console.log(`\nInstalled! Launcher path: ${LAUNCHER_PATH}`);
   console.log('\nRestart your shell or run:');
-  for (const rc of rcFiles) { console.log(`  source ${rc}`); }
+  for (const { rc } of targets) { console.log(`  source ${rc}`); }
   console.log('\nNote: If you switch Node versions (nvm), re-run: claude-auto-retry install');
 }
 
 async function cmdUninstall(): Promise<void> {
   const bashrc = join(homedir(), '.bashrc');
   const zshrc = join(homedir(), '.zshrc');
-  for (const rc of [bashrc, zshrc]) { await removeWrapper(rc); }
+  for (const rc of [bashrc, zshrc, fishConfigFile()]) { await removeWrapper(rc); }
   console.log('Shell function removed. Restart your shell to complete.');
 }
 

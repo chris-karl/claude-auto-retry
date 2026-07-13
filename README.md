@@ -85,7 +85,7 @@ tool can read *what's actually on screen* and inject the retry when needed.
 You type "claude"
        │
        ▼
-  Shell function (injected in .bashrc/.zshrc)
+  Shell function (injected in .bashrc/.zshrc/config.fish)
        │
        ▼
   Launcher hosts claude inside a PTY (node-pty)
@@ -450,7 +450,7 @@ Notes for agents:
 |-------|--------|
 | bash | Full (auto-install to `~/.bashrc`) |
 | zsh | Full (auto-install to `~/.zshrc`) |
-| fish | Manual setup (instructions printed on `install`) |
+| fish | Full (auto-install to `~/.config/fish/config.fish`) |
 
 ## `--print` Mode
 
@@ -548,10 +548,11 @@ claude-auto-retry/
 │   ├── pty.ts                # PTY host + headless terminal emulator (node-pty + @xterm/headless)
 │   ├── monitor.ts            # Core monitoring loop + retry logic (usage/overload/safeguard paths)
 │   ├── launcher.ts           # Process orchestration + I/O mirroring
-│   └── wrapper.sh            # Shell function template
+│   ├── wrapper.sh            # Shell function template (bash/zsh)
+│   └── wrapper.fish          # Shell function template (fish)
 ├── scripts/
 │   ├── postinstall.mjs       # Restores node-pty spawn-helper exec bit after npm install
-│   └── copy-assets.mjs       # Copies wrapper.sh + package.json into dist/ during build
+│   └── copy-assets.mjs       # Copies wrapper templates + package.json into dist/ during build
 ├── test/                     # Tests (node:test, *.test.ts)
 ├── tsconfig.json             # Type-check config (tsc --noEmit)
 ├── tsconfig.build.json       # Packaging build: emit dist/ with .ts→.js import rewrite
@@ -599,7 +600,6 @@ npm run check                         # typecheck + lint + knip + tests
 ### Areas for Contribution
 
 - **New rate limit patterns** — If you see a Claude Code rate limit message that isn't detected, open an issue with the exact text.
-- **Fish shell support** — Auto-install for fish shell (currently manual).
 - **Notification integration** — Desktop/Slack notification when rate limit detected or when Claude resumes.
 
 ## Related Projects

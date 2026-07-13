@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { injectWrapper, removeWrapper, MARKER_START, MARKER_END } from '../bin/cli.ts';
+import { injectWrapper, removeWrapper, MARKER_START, MARKER_END, FISH_WRAPPER_TEMPLATE } from '../bin/cli.ts';
 
 const CLI = fileURLToPath(new URL('../bin/cli.ts', import.meta.url));
 const runCli = (args: string[]) => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf-8' });
@@ -71,6 +71,22 @@ describe('injectWrapper', () => {
     assert.ok(!content.includes('old stuff'));
     assert.ok(content.includes('before'));
     assert.ok(content.includes('after'));
+  });
+  it('injects a fish function when given the fish template', async () => {
+    await writeFile(testFile, '');
+    await injectWrapper(testFile, '/path/to/launcher.js', FISH_WRAPPER_TEMPLATE);
+    const content = await readFile(testFile, 'utf-8');
+    assert.ok(content.includes(MARKER_START));
+    assert.ok(content.includes(MARKER_END));
+    assert.ok(content.includes('function claude'));
+    assert.ok(content.includes('env CLAUDE_AUTO_RETRY_ACTIVE=1 node "/path/to/launcher.js" $argv'));
+    assert.ok(!content.includes('claude() {'), 'fish template must not contain sh syntax');
+  });
+  it('fish wrapper passes fish syntax check (skipped without fish)', { skip: spawnSync('fish', ['--version']).error !== undefined }, async () => {
+    await writeFile(testFile, '');
+    await injectWrapper(testFile, '/path/to/launcher.js', FISH_WRAPPER_TEMPLATE);
+    const r = spawnSync('fish', ['--no-execute', testFile], { encoding: 'utf-8' });
+    assert.equal(r.status, 0, r.stderr);
   });
 });
 

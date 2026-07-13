@@ -9,5 +9,5 @@
     "bin/**/*.ts",
     "test/**/*.ts"
   ],
-  "ignoreBinaries": ["tail"]
+  "ignoreBinaries": ["tail", "fish"]
 }

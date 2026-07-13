@@ -35,6 +35,9 @@ export interface MonitorState {
   overloadAttempts: number;
   overloadTotalWaitMs: number;
   overloadWaitUntil: number;
+  // Event-path give-up hold: while set, overloadWaitUntil is the hold's expiry;
+  // a marker after expiry is a fresh incident with a fresh budget.
+  overloadGaveUp: boolean;
   lastOverloadMatch: PatternMatch | null;
   // viaEvent marks the current backoff window as event-triggered (edge: one send
   // per failure). eventHandledBanner remembers the banner a viaEvent retry just
@@ -70,7 +73,7 @@ export type TickResult =
 export function createMonitorState(): MonitorState {
   return {
     status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null, retrySent: false,
-    overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0, lastOverloadMatch: null,
+    overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0, overloadGaveUp: false, lastOverloadMatch: null,
     viaEvent: false, eventHandledBanner: null, lastIgnoredEventError: null,
     safeguardAttempts: 0, safeguardWaitUntil: 0, safeguardGaveUp: false, lastSafeguardMatch: null,
   };
@@ -102,6 +105,7 @@ function resetOverload(state: MonitorState): void {
   state.overloadAttempts = 0;
   state.overloadTotalWaitMs = 0;
   state.overloadWaitUntil = 0;
+  state.overloadGaveUp = false;
   state.viaEvent = false;
   state.eventHandledBanner = null;
 }
@@ -378,7 +382,18 @@ export async function processOneTick(
       await screen.clearEvent?.();                 // consume
       if (busy) { resetOverload(state); return 'overload-cleared'; } // self-recovered
       const capMs = config.overload.maxTotalWaitMinutes * 60_000;
-      if (state.overloadTotalWaitMs >= capMs) return 'overload-gave-up';
+      if (state.overloadTotalWaitMs >= capMs) {
+        // Give-up is a bounded hold, not a terminal state (the scraper path
+        // self-heals on "text gone"; the event path has no such signal, so the
+        // capped budget used to stick forever). A marker while the hold is fresh
+        // is the same incident; one after expiry gets a fresh budget.
+        if (!state.overloadGaveUp || Date.now() < state.overloadWaitUntil) {
+          state.overloadGaveUp = true;
+          state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * MAX_RETRIES_BACKOFF_INTERVALS);
+          return 'overload-gave-up';
+        }
+        resetOverload(state);
+      }
       const w = nextOverloadWaitMs(state.overloadAttempts, config.overload, rand);
       state.overloadTotalWaitMs += w;
       state.overloadWaitUntil = Date.now() + w;
@@ -471,6 +486,7 @@ export function runMonitor(
         log('warn', `Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       }
       if (result === 'overload-detected') {
+        overloadGaveUpLogged = false; // fresh episode → a later give-up logs loudly again
         const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
         const m = state.lastOverloadMatch;
         const why = m ? ` [matched /${m.pattern}/ in: "${m.line}"]` : '';

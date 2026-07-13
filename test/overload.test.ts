@@ -450,6 +450,35 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
     assert.equal(st.overloadAttempts, 1);     // give-up budget not reset
   });
 
+  // The capped budget must not stick forever: the scraper path self-heals on
+  // "text gone", but the event path used to keep the exhausted counter until a
+  // marker happened to land while Claude was busy — a fresh overload days after
+  // a give-up got an instant 'overload-gave-up' with no retry.
+  it('re-arms after the give-up hold: a marker after the cooldown starts a fresh episode', async () => {
+    const c = cfg();
+    const capMs = c.overload.maxTotalWaitMinutes * 60_000;
+    const st = createMonitorState();
+    st.overloadAttempts = 5; st.overloadTotalWaitMs = capMs; // budget exhausted by a prior episode
+    // marker at the cap → give up and open the hold window
+    const s1 = mockScreen('idle prompt', { event: makeEvent('overloaded') });
+    assert.equal(await processOneTick(st, s1, c, () => true, NO_JITTER), 'overload-gave-up');
+    assert.equal(st.overloadGaveUp, true);
+    assert.ok(st.overloadWaitUntil > Date.now());
+    // marker while the hold is fresh → same incident, held (and the hold extends)
+    const s2 = mockScreen('idle prompt', { event: makeEvent('overloaded') });
+    assert.equal(await processOneTick(st, s2, c, () => true, NO_JITTER), 'overload-gave-up');
+    assert.equal(s2._sent.length, 0);
+    // hold expired → the next marker is a fresh incident with a fresh budget
+    st.overloadWaitUntil = Date.now() - 1;
+    const s3 = mockScreen('idle prompt', { event: makeEvent('overloaded') });
+    assert.equal(await processOneTick(st, s3, c, () => true, NO_JITTER), 'overload-detected');
+    assert.equal(st.status, 'overload');
+    assert.equal(st.viaEvent, true);
+    assert.equal(st.overloadGaveUp, false);
+    assert.equal(st.overloadAttempts, 0);
+    assert.ok(st.overloadTotalWaitMs < capMs);
+  });
+
   it('works without event plumbing (adapter without readEvent falls back to the scraper)', async () => {
     const s = mockScreen('API Error: 529 Overloaded');
     delete s.readEvent;

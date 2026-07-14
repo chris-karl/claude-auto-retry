@@ -47,13 +47,15 @@
     "@xterm/headless": "^6.0.0",
     "node-pty": "^1.1.0"
   },
+  "//": "typescript is aliased to @typescript/typescript6 (the TS 6 JS API) because typescript-eslint cannot run on TS 7, which ships no JS API until 7.1; @typescript/native supplies the TS 7 tsc for build/typecheck. Drop both aliases once typescript-eslint supports TS 7.",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.0.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "eslint": "^10.5.0",
     "globals": "^17.6.0",
     "knip": "^6.17.1",
-    "typescript": "^6.0.3",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-eslint": "^8.61.1"
   }
 }

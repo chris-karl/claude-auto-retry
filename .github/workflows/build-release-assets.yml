@@ -39,6 +39,14 @@ jobs:
           # commit, because its tag does not exist until the draft publishes.
           ref: ${{ inputs.ref || inputs.tag }}
 
+      # A backfilled tag may predate the attach script; take it from the
+      # commit the workflow ran from instead of the built tree. The side
+      # directory stays out of the tarball (package.json `files`).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: .release-tooling
+          sparse-checkout: .github/scripts
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -55,4 +63,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
-        run: .github/scripts/build-release-assets/attach-tarball.sh
+        run: .release-tooling/.github/scripts/build-release-assets/attach-tarball.sh

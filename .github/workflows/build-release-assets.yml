@@ -1,9 +1,9 @@
 name: Build Release Assets
 
-# Builds the npm tarball and attaches it to a release: the versioned file
-# (claude-auto-retry-X.Y.Z.tgz) plus a stable-named copy
-# (claude-auto-retry.tgz) that keeps the releases/latest/download URL
-# working. The release notes get the pinned install command appended.
+# Builds the npm tarball and attaches it to a release as
+# claude-auto-retry.tgz, the single stable name that keeps the
+# releases/latest/download URL working. The release notes get their
+# pinned install command refreshed.
 # auto-release.yml calls this for every release it cuts; dispatch it
 # manually with a tag to (re)attach the tarball to an existing release,
 # e.g. to backfill releases that predate this workflow.

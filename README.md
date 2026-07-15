@@ -54,11 +54,11 @@ command works on every supported npm version:
 npm i -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
 ```
 
-To pin a version instead of following the latest release, use the versioned
-asset on that release's page, e.g.:
+To pin a version instead of following the latest release, name that release's
+tag in the URL, e.g.:
 
 ```bash
-npm i -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/download/v1.1.3/claude-auto-retry-1.1.3.tgz
+npm i -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/download/v1.1.3/claude-auto-retry.tgz
 ```
 
 `--allow-remote=root` opts in to installing the named package from a URL on

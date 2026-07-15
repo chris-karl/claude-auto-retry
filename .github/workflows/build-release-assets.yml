@@ -1,0 +1,58 @@
+name: Build Release Assets
+
+# Builds the npm tarball and attaches it to a release: the versioned file
+# (claude-auto-retry-X.Y.Z.tgz) plus a stable-named copy
+# (claude-auto-retry.tgz) that keeps the releases/latest/download URL
+# working. The release notes get the pinned install command appended.
+# auto-release.yml calls this for every release it cuts; dispatch it
+# manually with a tag to (re)attach the tarball to an existing release,
+# e.g. to backfill releases that predate this workflow.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Tag of the release to upload the tarball to'
+        required: true
+        type: string
+      ref:
+        description: 'Commit SHA to build (needed while the tag only exists on a draft release)'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Required — tag of the existing release to (re)attach the tarball to'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Dispatch runs build the tag itself; only workflow_call passes a
+          # commit, because its tag does not exist until the draft publishes.
+          ref: ${{ inputs.ref || inputs.tag }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      # Skip install scripts: node-pty's native build is not part of the
+      # tarball; the devDependencies only need to be present for the
+      # `prepare` build that `npm pack` runs.
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Pack the tarball and attach it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: .github/scripts/build-release-assets/attach-tarball.sh

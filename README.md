@@ -31,7 +31,7 @@ Claude stops. You have to wait hours, come back, and type "continue". If you're 
 ## The Solution
 
 ```bash
-npm i -g chris-karl/claude-auto-retry
+npm i -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
 claude-auto-retry install
 ```
 
@@ -47,31 +47,47 @@ You come back to find your task completed.
 ## Installation
 
 This tool is distributed **straight from GitHub** — there is no npm-registry
-package to install. `npm` installs directly from the repository, which gives you
-latest-or-pinned installs and pairs naturally with GitHub Releases:
+package to install. Every release ships a ready-built npm tarball, and one
+command works on every supported npm version:
 
-| Intent | Command |
-|--------|---------|
-| Latest (default branch `HEAD`) | `npm i -g chris-karl/claude-auto-retry` |
-| Pin to a release tag | `npm i -g chris-karl/claude-auto-retry#v1.0.0` |
-| Pin to a commit | `npm i -g chris-karl/claude-auto-retry#<sha>` |
-| Track a branch | `npm i -g chris-karl/claude-auto-retry#main` |
+```bash
+npm i -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
+```
 
-Then wire up the shell integration once:
+To pin a version instead of following the latest release, use the versioned
+asset on that release's page, e.g.:
+
+```bash
+npm i -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/download/v1.1.3/claude-auto-retry-1.1.3.tgz
+```
+
+`--allow-remote=root` opts in to installing the named package from a URL on
+npm ≥ 12, which disables all non-registry sources by default; dependencies
+still come from the npm registry. npm 11 knows the setting and accepts it,
+npm 10 ignores it — the command is the same everywhere.
+
+### Shell integration
+
+Then wire it up once:
 
 ```bash
 claude-auto-retry install        # inject the `claude` shell wrapper
 claude-auto-retry install-hook   # optional: event-driven overload detection
 ```
 
-The install runs a `prepare` build automatically — nothing to compile yourself.
+The release tarball ships compiled JavaScript — nothing builds at install
+time. Recent npm versions print advisory `allow-scripts` warnings naming
+`claude-auto-retry` and `node-pty`; install scripts still run, the warning
+only notes that no explicit policy covers them yet. Silence it with npm's
+suggested `--allow-scripts=...` flag, or ignore it.
 **Requirements:** Node.js ≥ 20, plus a C/C++ toolchain on Linux for `node-pty`
 (macOS and Windows use prebuilt binaries — see
 [Platform Support](#platform-support)).
 
-To **update**, re-run your install command. To **uninstall**,
-`npm uninstall -g claude-auto-retry` (the package is always named
-`claude-auto-retry`, whichever ref you fetched).
+To **update**, re-run your install command (the `latest` URL always serves
+the newest release). To **uninstall**, `npm uninstall -g claude-auto-retry`
+(the package is always named `claude-auto-retry`, whichever source you
+fetched).
 
 ## How it Works
 
@@ -408,10 +424,13 @@ If you are an AI agent (Claude Code, Codex, etc.) installing this for your user,
 full setup is non-interactive:
 
 ```bash
-npm install -g chris-karl/claude-auto-retry
+npm install -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
 claude-auto-retry install        # shell wrapper
 claude-auto-retry install-hook   # recommended: event-driven, scrape-free overload detection
 ```
+
+The `--allow-remote=root` flag is required on npm ≥ 12 and harmless on older
+versions; see [Installation](#installation) for pinned installs.
 
 Notes for agents:
 
@@ -526,11 +545,14 @@ that lets an install ship compiled `.js`. To install the CLI globally from your
 checkout:
 
 ```bash
-npm install -g .    # packs and installs like a real GitHub install; re-run
-                    # (or `npm run build`) after source edits
+npm pack . && npm i -g ./claude-auto-retry-*.tgz
+                    # a real copy, like a GitHub install; re-run after edits
 npm link            # symlinks the global bin to dist/bin/cli.js — re-run
                     # `npm run build` after edits (or run `node bin/cli.ts`)
 ```
+
+(`npm install -g .` is no longer an option: modern npm symlinks directory
+installs, making it identical to `npm link`.)
 
 After either, run `claude-auto-retry install` to inject the shell wrapper.
 

@@ -55,7 +55,7 @@ jobs:
 
       # Skip install scripts: node-pty's native build is not part of the
       # tarball; the devDependencies only need to be present for the
-      # `prepare` build that `npm pack` runs.
+      # attach script's explicit build.
       - name: Install
         run: npm ci --ignore-scripts
 

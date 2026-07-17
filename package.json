@@ -8,13 +8,11 @@
   },
   "scripts": {
     "build": "tsc --noCheck -p tsconfig.build.json && node scripts/copy-assets.mjs",
-    "prepare": "npm run build",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "knip": "knip",
-    "check": "npm run typecheck && npm run lint && npm run knip && npm test",
-    "postinstall": "node scripts/postinstall.mjs"
+    "check": "npm run typecheck && npm run lint && npm run knip && npm test"
   },
   "license": "MIT",
   "engines": {
@@ -39,13 +37,15 @@
   },
   "files": [
     "dist/",
-    "scripts/postinstall.mjs",
     "LICENSE",
     "README.md"
   ],
   "dependencies": {
     "@xterm/headless": "^6.0.0",
     "node-pty": "^1.1.0"
+  },
+  "allowScripts": {
+    "node-pty": true
   },
   "//": "typescript is aliased to @typescript/typescript6 (the TS 6 JS API) because typescript-eslint cannot run on TS 7, which ships no JS API until 7.1; @typescript/native supplies the TS 7 tsc for build/typecheck. Drop both aliases once typescript-eslint supports TS 7.",
   "devDependencies": {

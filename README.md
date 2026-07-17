@@ -31,7 +31,7 @@ Claude stops. You have to wait hours, come back, and type "continue". If you're 
 ## The Solution
 
 ```bash
-npm i -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
+npm i -g --allow-remote=root --allow-scripts=node-pty https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
 claude-auto-retry install
 ```
 
@@ -51,20 +51,27 @@ package to install. Every release ships a ready-built npm tarball, and one
 command works on every supported npm version:
 
 ```bash
-npm i -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
+npm i -g --allow-remote=root --allow-scripts=node-pty https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
 ```
 
 To pin a version instead of following the latest release, name that release's
 tag in the URL, e.g.:
 
 ```bash
-npm i -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/download/v1.1.3/claude-auto-retry.tgz
+npm i -g --allow-remote=root --allow-scripts=node-pty https://github.com/chris-karl/claude-auto-retry/releases/download/v1.1.4/claude-auto-retry.tgz
 ```
 
 `--allow-remote=root` opts in to installing the named package from a URL on
 npm ≥ 12, which disables all non-registry sources by default; dependencies
-still come from the npm registry. npm 11 knows the setting and accepts it,
-npm 10 ignores it — the command is the same everywhere.
+still come from the npm registry.
+
+`--allow-scripts=node-pty` approves node-pty's install script — the native
+build this tool needs on Linux — which npm ≥ 11.17 skips unless the installer
+explicitly allows it. The release tarball itself ships no install scripts, so
+nothing else needs approving.
+
+Older npm versions ignore the flags they don't know — the command is the
+same everywhere.
 
 ### Shell integration
 
@@ -76,10 +83,7 @@ claude-auto-retry install-hook   # optional: event-driven overload detection
 ```
 
 The release tarball ships compiled JavaScript — nothing builds at install
-time. Recent npm versions print advisory `allow-scripts` warnings naming
-`claude-auto-retry` and `node-pty`; install scripts still run, the warning
-only notes that no explicit policy covers them yet. Silence it with npm's
-suggested `--allow-scripts=...` flag, or ignore it.
+time.
 **Requirements:** Node.js ≥ 20, plus a C/C++ toolchain on Linux for `node-pty`
 (macOS and Windows use prebuilt binaries — see
 [Platform Support](#platform-support)).
@@ -424,13 +428,14 @@ If you are an AI agent (Claude Code, Codex, etc.) installing this for your user,
 full setup is non-interactive:
 
 ```bash
-npm install -g --allow-remote=root https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
+npm install -g --allow-remote=root --allow-scripts=node-pty https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz
 claude-auto-retry install        # shell wrapper
 claude-auto-retry install-hook   # recommended: event-driven, scrape-free overload detection
 ```
 
-The `--allow-remote=root` flag is required on npm ≥ 12 and harmless on older
-versions; see [Installation](#installation) for pinned installs.
+`--allow-remote=root` is required on npm ≥ 12, `--allow-scripts` on
+npm ≥ 11.17; both are harmless on older versions. See
+[Installation](#installation) for details and pinned installs.
 
 Notes for agents:
 
@@ -526,8 +531,7 @@ Contributions are welcome! Here's how to get started:
 ```bash
 git clone https://github.com/chris-karl/claude-auto-retry.git
 cd claude-auto-retry
-npm install         # installs deps (Linux builds node-pty) and runs the
-                    # `prepare` build once, compiling src/ + bin/ into dist/
+npm install         # installs deps (Linux builds node-pty)
 npm run check       # type-check + lint + dead-code scan + tests
 ```
 
@@ -540,13 +544,13 @@ npm test                    # tests import the .ts sources as-is
 ```
 
 `npm run build` transpiles `src/` + `bin/` to `dist/` (emit-only via
-`tsconfig.build.json`) and `prepare` runs it automatically — the packaging build
-that lets an install ship compiled `.js`. To install the CLI globally from your
-checkout:
+`tsconfig.build.json`) — the packaging build that lets an install ship compiled
+`.js`; the release workflow runs it before packing the tarball. To install the
+CLI globally from your checkout:
 
 ```bash
-npm pack . && npm i -g ./claude-auto-retry-*.tgz
-                    # a real copy, like a GitHub install; re-run after edits
+npm run build && npm pack . && npm i -g ./claude-auto-retry-*.tgz
+                    # a real copy, like a release install; re-run after edits
 npm link            # symlinks the global bin to dist/bin/cli.js — re-run
                     # `npm run build` after edits (or run `node bin/cli.ts`)
 ```
@@ -572,13 +576,11 @@ claude-auto-retry/
 │   ├── launcher.ts           # Process orchestration + I/O mirroring
 │   ├── wrapper.sh            # Shell function template (bash/zsh)
 │   └── wrapper.fish          # Shell function template (fish)
-├── scripts/
-│   ├── postinstall.mjs       # Restores node-pty spawn-helper exec bit after npm install
-│   └── copy-assets.mjs       # Copies wrapper templates + package.json into dist/ during build
+├── scripts/copy-assets.mjs   # Copies wrapper templates + package.json into dist/ during build
 ├── test/                     # Tests (node:test, *.test.ts)
 ├── tsconfig.json             # Type-check config (tsc --noEmit)
 ├── tsconfig.build.json       # Packaging build: emit dist/ with .ts→.js import rewrite
-├── dist/                     # Compiled JS shipped on install (git-ignored; built by `prepare`)
+├── dist/                     # Compiled JS shipped on install (git-ignored; built by `npm run build`)
 ├── eslint.config.js          # ESLint flat config (typescript-eslint)
 ├── knip.json                 # Dead-code / unused-dependency config
 ├── .github/                  # CI (run-checks.yml: typecheck + lint + knip + tests +
@@ -595,7 +597,7 @@ claude-auto-retry/
 - **Event-driven when possible** — the `StopFailure` hook is the authoritative overload trigger, with the anchored scraper as a deduplicated safety net.
 - **Iterative DST correction** — timezone offset is computed via a convergence loop, not a single-shot formula that breaks at DST boundaries.
 - **Config validation** — invalid config values fall back to safe defaults instead of producing NaN/undefined behavior.
-- **TypeScript sources, compiled only for packaging** — a checkout runs the `.ts` directly via Node's type stripping (>= 22.18); installs run `dist/` built by the emit-only `prepare` step, since Node won't strip types under `node_modules`.
+- **TypeScript sources, compiled only for packaging** — a checkout runs the `.ts` directly via Node's type stripping (>= 22.18); installs run `dist/` built at release time by the emit-only packaging build, since Node won't strip types under `node_modules`.
 
 ### Running Tests
 

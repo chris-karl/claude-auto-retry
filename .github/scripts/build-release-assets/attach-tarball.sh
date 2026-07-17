@@ -13,7 +13,8 @@ if [ "v$version" != "$TAG" ]; then
   exit 1
 fi
 
-# npm pack runs the `prepare` build, so the tarball ships compiled dist/.
+# The manifest carries no `prepare` script, so build explicitly before packing.
+npm run build
 npm pack
 tarball=claude-auto-retry.tgz
 mv "claude-auto-retry-$version.tgz" "$tarball"
@@ -46,7 +47,7 @@ case $notes in
       awk '$0 == "**Install this release with:**" { exit } { print }')
     ;;
 esac
-notes=$(printf '%s\n\n**Install this release with:**\n\n```sh\nnpm i -g --allow-remote=root %s\n```\n' \
+notes=$(printf '%s\n\n**Install this release with:**\n\n```sh\nnpm i -g --allow-remote=root --allow-scripts=node-pty %s\n```\n' \
   "$notes" "$url")
 
 if [ "$notes" = "$body" ]; then

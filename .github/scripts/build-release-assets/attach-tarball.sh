@@ -47,7 +47,7 @@ case $notes in
       awk '$0 == "**Install this release with:**" { exit } { print }')
     ;;
 esac
-notes=$(printf '%s\n\n**Install this release with:**\n\n```sh\nnpm i -g --allow-remote=root --allow-scripts=node-pty %s\n```\n' \
+notes=$(printf '%s\n\n\n**Install this release with:**\n\n```sh\nnpm i -g --allow-remote=root --allow-scripts=node-pty %s\n```\n' \
   "$notes" "$url")
 
 if [ "$notes" = "$body" ]; then

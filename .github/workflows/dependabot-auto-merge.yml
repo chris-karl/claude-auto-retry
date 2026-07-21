@@ -13,10 +13,9 @@ on:
         required: true
         type: string
 
+# Read-only floor; only the merge job elevates to the writable token it needs.
 permissions:
-  contents: write
-  pull-requests: write
-  actions: write
+  contents: read
 
 # One check per PR; a force-push by Dependabot obsoletes the running one.
 concurrency:
@@ -29,13 +28,25 @@ jobs:
   resolve-test-merge:
     if: github.actor == 'dependabot[bot]' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Only inspects the PR through the API — never needs the writable token.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       pr: ${{ steps.resolve.outputs.pr }}
       merge_sha: ${{ steps.resolve.outputs.merge_sha }}
       head_sha: ${{ steps.resolve.outputs.head_sha }}
       skip_check: ${{ steps.resolve.outputs.skip_check }}
+      update_type: ${{ steps.metadata.outputs.update-type }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Source the scripts from trusted main, not the untrusted PR merge
+          # tree default-checkout would use on a pull_request: the steps hand
+          # them a writable token and they only call the GitHub API, so the PR
+          # tree is never needed. (Empty -> main on dispatch.)
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
 
       - name: Resolve the test merge commit to check
         id: resolve
@@ -48,6 +59,17 @@ jobs:
           PR_EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
           RUN_MERGE_SHA: ${{ github.sha }}
         run: .github/scripts/dependabot-auto-merge/resolve-test-merge.sh
+
+      # Read-only lookup, kept in this read-only job so the writable-token
+      # merge job never hands a token to a third-party action. Skipped on
+      # dispatch — no PR context there, and the merge step's own
+      # workflow_dispatch guard already covers that path.
+      - name: Fetch Dependabot metadata
+        if: github.event_name == 'pull_request'
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   # The merge gate: run-checks.yml on the resolved test merge, so a
   # dispatch retry after main moved validates the fresh combination.
@@ -69,19 +91,23 @@ jobs:
       needs.resolve-test-merge.outputs.pr != '' &&
       (needs.check.result == 'success' || needs.check.result == 'skipped')
     runs-on: ubuntu-latest
+    # The only job that writes: it squash-merges the PR and dispatches the
+    # follow-up workflows.
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Fetch Dependabot metadata
-        if: github.event_name == 'pull_request'
-        id: metadata
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Same as resolve-test-merge: run merge-pr.sh from trusted main, not
+          # the PR merge tree, since it too wields a writable token via the API.
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
 
       # Dispatch retries already passed the non-major check once.
       - name: Merge non-major updates
-        if: github.event_name == 'workflow_dispatch' || steps.metadata.outputs.update-type != 'version-update:semver-major'
+        if: github.event_name == 'workflow_dispatch' || needs.resolve-test-merge.outputs.update_type != 'version-update:semver-major'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

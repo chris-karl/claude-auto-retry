@@ -15,6 +15,8 @@ else
   git commit -m "Bump version to $version"
   # If main moved, this push fails the run; the newer commit's own
   # auto-release run redoes the bump and releases everything together.
-  git push origin HEAD:main
+  # Push with an explicit one-shot token (checkout persists no credentials),
+  # so the writable token never lands in .git/config.
+  git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
 fi
 echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"

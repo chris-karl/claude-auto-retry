@@ -45,6 +45,10 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          # bump-version.sh pushes with an explicit token instead, so the
+          # writable credential is never left in .git/config — nothing this
+          # job runs now or later could scrape it from there.
+          persist-credentials: false
 
       - name: Decide whether a release should happen and which tag it gets
         id: decide
@@ -57,6 +61,7 @@ jobs:
         if: steps.decide.outputs.release == 'true'
         id: bump
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.decide.outputs.tag }}
         run: .github/scripts/auto-release/bump-version.sh
 

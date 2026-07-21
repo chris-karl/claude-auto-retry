@@ -33,7 +33,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Dispatch runs build the tag itself; only workflow_call passes a
           # commit, because its tag does not exist until the draft publishes.
@@ -42,7 +42,7 @@ jobs:
       # A backfilled tag may predate the attach script; take it from the
       # commit the workflow ran from instead of the built tree. The side
       # directory stays out of the tarball (package.json `files`).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: .release-tooling
           sparse-checkout: .github/scripts

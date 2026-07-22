@@ -2,8 +2,8 @@ name: Build Release Assets
 
 # Builds the npm tarball and attaches it to a release as
 # claude-auto-retry.tgz, the single stable name that keeps the
-# releases/latest/download URL working. The release notes get their
-# pinned install command refreshed.
+# releases/latest/download URL working, then shapes the release notes
+# (rebranded heading and a pinned install command) in a separate step.
 # auto-release.yml calls this for every release it cuts; dispatch it
 # manually with a tag to (re)attach the tarball to an existing release,
 # e.g. to backfill releases that predate this workflow.
@@ -32,6 +32,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # The single stable asset name, inherited by the attach and finalize
+    # steps so it is defined in exactly one place.
+    env:
+      TARBALL: claude-auto-retry.tgz
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,3 +72,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: .release-tooling/.github/scripts/build-release-assets/attach-tarball.sh
+
+      # Runs only after the tarball is attached, so the pinned install
+      # command always points at an asset that already exists.
+      - name: Finalize the release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: .release-tooling/.github/scripts/build-release-assets/finalize-release-notes.sh

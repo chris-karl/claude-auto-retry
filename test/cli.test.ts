@@ -110,7 +110,7 @@ describe('wrapper function', () => {
   delete env.CLAUDE_AUTO_RETRY_ACTIVE;
 
   async function run(shell: string, template: string, launcherPath: string, extraEnv: Record<string, string> = {}): Promise<string> {
-    const rc = join(dir, `rc.${shell}`);
+    const rc = join(dir, shell === 'pwsh' ? 'rc.ps1' : `rc.${shell}`); // pwsh dot-sources .ps1 files only
     await writeFile(rc, '');
     await injectWrapper(rc, launcherPath, template);
     const cmd = shell === 'pwsh' ? ['-NoProfile', '-Command', `. '${rc}'; claude one two`] : ['-c', `source "${rc}"; claude one two`];

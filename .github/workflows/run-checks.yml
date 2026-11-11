@@ -2,7 +2,7 @@ name: Run Checks
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
   pull_request:
     branches: [main]
   # Lets dependabot-auto-merge.yml run these checks as its merge gate.

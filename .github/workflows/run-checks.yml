@@ -24,6 +24,9 @@ concurrency:
 
 jobs:
   check:
+    # A Dependabot PR gets these checks through dependabot-auto-merge.yml's
+    # gate (which passes inputs.ref), so skip the identical standalone run.
+    if: github.actor != 'dependabot[bot]' || inputs.ref != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

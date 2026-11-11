@@ -20,6 +20,13 @@ Examples: `feature/fix-button-spacing`, `feature/add-retry-backoff`.
 - Commit freely — every meaningful change can be its own commit.
 - **Push after every commit.** (No extra consent is needed for these feature-branch
   pushes; the consent rule below applies only to the squash commit.)
+- **Open a pull request to `main` after the first push.** The Run Checks workflow
+  runs only on `main` and on pull requests, so the PR is what gets the branch tested
+  in CI; later pushes update it. Opening the PR needs the user's GitHub login: give
+  the user the branch's `pull/new` link (or use `curl` with a token when one is
+  available). Wait for the PR's checks to pass before asking for squash consent.
+- The PR is never merged on GitHub. The squash flow below merges locally, and
+  deleting the branch in its last step closes the PR.
 
 ### Commit message style
 

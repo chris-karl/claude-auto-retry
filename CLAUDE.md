@@ -23,8 +23,11 @@ Examples: `feature/fix-button-spacing`, `feature/add-retry-backoff`.
 - **Open a pull request to `main` after the first push.** The Run Checks workflow
   runs only on `main` and on pull requests, so the PR is what gets the branch tested
   in CI; later pushes update it. Opening the PR needs the user's GitHub login: give
-  the user the branch's `pull/new` link (or use `curl` with a token when one is
-  available). Wait for the PR's checks to pass before asking for squash consent.
+  the user the compare link
+  `https://github.com/chris-karl/claude-auto-retry/compare/main...<branch>?expand=1`
+  (or use `curl` with a token when one is available). Do not hand out the
+  `pull/new` link git prints on push: on a fork it targets the upstream repo.
+  Wait for the PR's checks to pass before asking for squash consent.
 - The PR is never merged on GitHub. The squash flow below merges locally, and
   deleting the branch in its last step closes the PR.
 

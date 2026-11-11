@@ -22,6 +22,7 @@ export interface Config {
   retryCooldownSeconds: number;
   retryMessage: string;
   customPatterns: string[];
+  updateCheck: boolean;
   overload: RetryConfig;
   safeguard: RetryConfig;
 }
@@ -59,6 +60,7 @@ export const DEFAULT_CONFIG: Config = {
   retryCooldownSeconds: 30,
   retryMessage: 'Continue where you left off. The previous attempt was rate limited.',
   customPatterns: [],
+  updateCheck: true,
   overload: DEFAULT_OVERLOAD,
   safeguard: DEFAULT_SAFEGUARD,
 };
@@ -103,6 +105,7 @@ function validate(raw: Record<string, unknown>): Config {
     retryCooldownSeconds: validNumber(raw.retryCooldownSeconds, 1, DEFAULT_CONFIG.retryCooldownSeconds),
     retryMessage: typeof raw.retryMessage === 'string' && raw.retryMessage ? raw.retryMessage : DEFAULT_CONFIG.retryMessage,
     customPatterns: Array.isArray(raw.customPatterns) ? raw.customPatterns.filter(isUsablePattern) : [],
+    updateCheck: typeof raw.updateCheck === 'boolean' ? raw.updateCheck : DEFAULT_CONFIG.updateCheck,
     overload: validateRetry(raw.overload, DEFAULT_OVERLOAD),
     safeguard: validateRetry(raw.safeguard, DEFAULT_SAFEGUARD),
   };

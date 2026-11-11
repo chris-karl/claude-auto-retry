@@ -12,6 +12,7 @@ describe('DEFAULT_CONFIG', () => {
     assert.equal(DEFAULT_CONFIG.retryCooldownSeconds, 30);
     assert.equal(typeof DEFAULT_CONFIG.retryMessage, 'string');
     assert.deepEqual(DEFAULT_CONFIG.customPatterns, []);
+    assert.equal(DEFAULT_CONFIG.updateCheck, true);
   });
 });
 
@@ -39,6 +40,10 @@ describe('loadConfig', () => {
     // non-strings and the uncompilable "[invalid".
     const config = await loadFromRaw(JSON.stringify({ customPatterns: ["valid", 42, null, "", "[invalid"] }));
     assert.deepEqual(config.customPatterns, ["valid"]);
+  });
+  it('honors updateCheck only as a boolean', async () => {
+    assert.equal((await loadFromRaw(JSON.stringify({ updateCheck: false }))).updateCheck, false);
+    assert.equal((await loadFromRaw(JSON.stringify({ updateCheck: 'no' }))).updateCheck, true);
   });
   it('rejects negative numbers and falls back to defaults', async () => {
     const config = await loadFromRaw(JSON.stringify({ maxRetries: -1, marginSeconds: -10 }));

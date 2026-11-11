@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DEFAULT_LOG_DIR, todayFile } from '../src/logger.ts';
+import { INSTALL_COMMAND } from '../src/update-check.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -21,8 +22,6 @@ export const PS_WRAPPER_TEMPLATE = join(SRC_DIR, 'wrapper.ps1');
 
 export const MARKER_START = '# >>> claude-auto-retry >>>';
 export const MARKER_END = '# <<< claude-auto-retry <<<';
-
-const INSTALL_COMMAND = 'npm i -g --allow-remote=root --allow-scripts=node-pty https://github.com/chris-karl/claude-auto-retry/releases/latest/download/claude-auto-retry.tgz';
 
 // --- Wrapper injection ---
 

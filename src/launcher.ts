@@ -4,6 +4,7 @@ import { createLogger } from './logger.ts';
 import { runMonitor } from './monitor.ts';
 import type { ScreenAdapter } from './monitor.ts';
 import { spawnPty, createTerminal, readScreen, findClaudeBinary } from './pty.ts';
+import { checkForUpdate } from './update-check.ts';
 
 // Gap between typing the retry text and the submitting Enter. Claude Code's Ink
 // TUI treats text + Enter arriving in one burst as a PASTE (the Enter becomes a
@@ -68,6 +69,11 @@ async function launchInteractive(args: string[]): Promise<number> {
     process.stderr.write('[claude-auto-retry] Falling back to a plain (unmonitored) claude session.\n');
     return runPlain(claudeBin, args);
   }
+
+  // Checked while the session runs, printed after it: a line written now would land
+  // in Claude's TUI.
+  const updateAbort = new AbortController();
+  const updateNotice = config.updateCheck ? checkForUpdate(updateAbort.signal) : Promise.resolve(null);
 
   // PTY output -> real terminal + headless emulator (for screen detection).
   child.onData((data) => {
@@ -147,12 +153,15 @@ async function launchInteractive(args: string[]): Promise<number> {
   logger.info(`Monitor started (claude PID: ${child.pid})`).catch(() => {});
 
   return new Promise((resolve) => {
-    child.onExit(({ exitCode, signal }) => {
+    child.onExit(async ({ exitCode, signal }) => {
       exited = true;
       stopMonitor();
       if (signalFallback) { clearTimeout(signalFallback); signalFallback = null; }
       restoreTerminal();
       logger.info('Claude exited. Monitor shutting down.').catch(() => {});
+      updateAbort.abort();   // don't hold the exit for a check still in flight
+      const notice = await updateNotice;
+      if (notice) process.stderr.write(`${notice}\n`);
       resolve(toExitCode(exitCode, signal));
     });
   });

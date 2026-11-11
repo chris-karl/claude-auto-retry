@@ -44,6 +44,11 @@ needed on current npm versions and ignored by older ones.
 To update, run the `npm i -g …` command again. To pin a version, replace
 `latest/download` in the URL with `download/<tag>`.
 
+Once a day the launcher asks GitHub for the latest release number. When a newer
+version exists, it prints one notice after your `claude` session ends. Nothing is
+installed automatically; set `"updateCheck": false` in the configuration to turn
+the check off.
+
 ## How it works
 
 ```
@@ -101,6 +106,7 @@ values fall back to the defaults shown:
   "retryCooldownSeconds": 30,
   "retryMessage": "Continue where you left off. The previous attempt was rate limited.",
   "customPatterns": [],
+  "updateCheck": true,
   "overload": {
     "enabled": true,
     "patterns": ["API Error:.*\\b(429|500|502|503|504|529)\\b", "overloaded_error", "temporarily limiting requests"],
@@ -127,6 +133,7 @@ values fall back to the defaults shown:
 | `retryCooldownSeconds` | Pause after a sent retry before the screen is re-checked |
 | `retryMessage` | Text typed into Claude after a usage limit |
 | `customPatterns` | Extra case-insensitive regexes that count as a usage limit |
+| `updateCheck` | Daily check for a newer release, with a notice after the session |
 | `overload`, `safeguard` | One API-error path each: `patterns` (regexes matched near an `API Error` line), `backoffSeconds` (wait before each send, the last entry repeats), `maxRetries`, `retryMessage` |
 
 Set `CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER` to prefix the `claude` process with another
@@ -191,6 +198,7 @@ src/patterns.ts     screen detectors (chrome-aware tail, ANSI stripping)
 src/time-parser.ts  reset-time parsing (clock, date, timezone, DST)
 src/config.ts       ~/.claude-auto-retry.json loading and validation
 src/pty.ts          node-pty + @xterm/headless glue
+src/update-check.ts daily check for a newer release
 src/wrapper.*       shell function templates
 ```
 

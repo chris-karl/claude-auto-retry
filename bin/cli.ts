@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile, writeFile, mkdir, stat, open } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, open } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -168,22 +168,22 @@ async function cmdStatus(): Promise<void> {
 // Print today's log and keep following appended lines (a portable `tail -f`).
 async function cmdLogs(): Promise<void> {
   const logFile = todayFile();
-  if (!existsSync(logFile)) {
+  let fh;
+  try {
+    fh = await open(logFile, 'r');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     console.log(`No log file for today: ${logFile}`);
     return;
   }
+  // Stat the open handle, not the path, so size and reads refer to the same file.
   let offset = 0;
   for (;;) {
-    const { size } = await stat(logFile);
+    const { size } = await fh.stat();
     if (size > offset) {
-      const fh = await open(logFile, 'r');
-      try {
-        const { buffer, bytesRead } = await fh.read(Buffer.alloc(size - offset), 0, size - offset, offset);
-        process.stdout.write(buffer.subarray(0, bytesRead));
-      } finally {
-        await fh.close();
-      }
-      offset = size;
+      const { buffer, bytesRead } = await fh.read(Buffer.alloc(size - offset), 0, size - offset, offset);
+      process.stdout.write(buffer.subarray(0, bytesRead));
+      offset += bytesRead;
     }
     await new Promise((r) => setTimeout(r, 1000));
   }

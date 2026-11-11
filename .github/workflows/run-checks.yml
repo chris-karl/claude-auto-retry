@@ -39,7 +39,8 @@ jobs:
           # CI runs the .ts sources directly (needs type stripping), so it can't
           # use the engines floor of 20 that the compiled dist/ targets.
           node-version: '24'
-          cache: npm
+          # No npm cache: a dispatched auto-merge retry runs an untrusted tree
+          # in main's cache scope, so nothing may restore from that scope.
 
       # Skip install scripts: node-pty's native build isn't needed to
       # type-check, lint or run the tests (node-pty is only imported

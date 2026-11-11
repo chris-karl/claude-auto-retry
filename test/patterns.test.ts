@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, isRateLimited, findRateLimitMessage, isLimitMenuPrompt, isWorking } from '../src/patterns.ts';
+import { stripAnsi, findRateLimit, isLimitMenuPrompt, isNativeContinuing, isWorking } from '../src/patterns.ts';
+
+const isRateLimited = (text: string, custom: Array<string | RegExp> = [], tail = 0): boolean => findRateLimit(text, custom, tail) !== null;
 
 describe('stripAnsi', () => {
   it('removes bold codes', () => {
@@ -33,8 +35,9 @@ describe('isRateLimited', () => {
   it('detects "out of extra usage"', () => {
     assert.equal(isRateLimited("You're out of extra usage · resets 3pm"), true);
   });
-  it('detects "try again in 5 hours"', () => {
-    assert.equal(isRateLimited('Please try again in 5 hours'), true);
+  it('does not treat prose "try again in 5 minutes" as a limit (no limit wording)', () => {
+    assert.equal(isRateLimited('Please try again in 5 minutes'), false);
+    assert.equal(isRateLimited('curl: (22) 429 Too Many Requests · try again in 5 minutes'), false);
   });
   it('detects "rate limit resets"', () => {
     assert.equal(isRateLimited('Rate limit hit. Resets at 4pm'), true);
@@ -89,6 +92,16 @@ describe('isRateLimited', () => {
   });
   it('ignores the "used N% of your weekly limit" gauge too', () => {
     assert.equal(isRateLimited("You've used 75% of your weekly limit · resets May 28 at 7pm (Europe/Madrid)"), false);
+  });
+  it('ignores the other live gauge variants ("Over N% … used", "Approaching …", "close to your …")', () => {
+    assert.equal(isRateLimited('Over 85% of your session limit used · resets 3:45pm'), false);
+    assert.equal(isRateLimited('Approaching session limit · resets 3:45pm (Europe/Berlin)'), false);
+    assert.equal(isRateLimited("You're close to your usage limit\nYou've used 80% of your session limit · resets 3pm"), false);
+    assert.equal(isRateLimited('Approaching your 5-hour usage limit — Claude will wrap up the current step.\n· resets 3pm'), false);
+  });
+  it('does not take an API error line for the usage banner (API-level 429 next to the gauge)', () => {
+    const pane = ['● API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited', '', "You've used 85% of your session limit · resets 3:45pm", '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
   });
   it('still detects a real hit banner even when the usage gauge is also on screen', () => {
     const text = [
@@ -292,6 +305,11 @@ describe('isLimitMenuPrompt', () => {
   it('detects the spend-limit menu', () => {
     assert.equal(isLimitMenuPrompt(spendMenu), true);
   });
+  it('detects the native auto-continue menu ("Wait here, then continue automatically …")', () => {
+    const nativeMenu = ['Usage limit reached · limit resets Oct 9, 10am', 'What do you want to do?',
+      '❯ 1. Wait here, then continue automatically at Oct 9, 10am', "  2. Don't continue automatically", '  3. Upgrade your plan'].join('\n');
+    assert.equal(isLimitMenuPrompt(nativeMenu), true);
+  });
   it('ignores a generic "What do you want to do?" menu', () => {
     assert.equal(isLimitMenuPrompt('What do you want to do?\n❯ Open file\n  Close file'), false);
   });
@@ -348,8 +366,12 @@ describe('isWorking', () => {
   it('treats the "Retrying in" suffix as still-working', () => {
     assert.equal(isWorking('API Error: 529 Overloaded · Retrying in 5s · attempt 3/10'), true);
   });
-  it('treats an "attempt n/m" indicator as still-working', () => {
-    assert.equal(isWorking('thinking… attempt 2/10'), true);
+  it('treats the parens form with a reset time as still-working', () => {
+    assert.equal(isWorking('API Error (429 rate limited) · Retrying in 5s (3:45pm) · attempt 2/10'), true);
+  });
+  it('does not treat a test runner\'s "Retrying in 5s (attempt 2/3)" as working (no middle dots)', () => {
+    assert.equal(isWorking('  ⎿  deploying… Retrying in 5s (attempt 2/3)...'), false);
+    assert.equal(isWorking('npm WARN retry will retry, error on last attempt 3/3'), false);
   });
   it('ignores a working footer that scrolled far up out of the tail', () => {
     const screen = ['old… (esc to interrupt)', ...Array(15).fill('● unrelated output'), '❯ '].join('\n');
@@ -404,29 +426,41 @@ describe('stripAnsi (private-mode sequences)', () => {
   });
 });
 
-describe('findRateLimitMessage', () => {
+describe('findRateLimit', () => {
   it('returns the matching line from multiline input', () => {
     const text = 'Some output\n5-hour limit reached - resets 3pm (Europe/Dublin)\nMore output';
-    assert.equal(findRateLimitMessage(text), '5-hour limit reached - resets 3pm (Europe/Dublin)');
+    assert.equal(findRateLimit(text), '5-hour limit reached - resets 3pm (Europe/Dublin)');
   });
   it('returns null when no match', () => {
-    assert.equal(findRateLimitMessage('normal output\nmore output'), null);
+    assert.equal(findRateLimit('normal output\nmore output'), null);
   });
   it('returns the resets line from multi-line TUI render', () => {
     const text = '⚠ You\'ve hit your limit\n· resets 3pm (UTC)';
-    assert.equal(findRateLimitMessage(text), '· resets 3pm (UTC)');
+    assert.equal(findRateLimit(text), '· resets 3pm (UTC)');
   });
   it('returns Resets line when limit and resets on different lines', () => {
     const text = '5-hour limit reached\nResets at 3pm (UTC)';
-    assert.ok(findRateLimitMessage(text)!.includes('3pm'));
+    assert.ok(findRateLimit(text)!.includes('3pm'));
   });
   it('returns the freshest reset line when a stale one lingers above', () => {
     const text = 'hit your limit · resets 11:30am (UTC)\nworked a while\nhit your limit · resets 4:30pm (UTC)';
-    assert.ok(findRateLimitMessage(text)!.includes('4:30pm'));
+    assert.ok(findRateLimit(text)!.includes('4:30pm'));
   });
   it('returns the dated weekly reset line', () => {
-    const text = "You've hit your weekly limit · resets May 28 at 7pm (Europe/Madrid)";
-    assert.ok(findRateLimitMessage(text)!.includes('May 28'));
+    const text = "You've hit your weekly limit · resets Oct 9, 10am (Europe/Berlin)";
+    assert.ok(findRateLimit(text)!.includes('Oct 9'));
+  });
+  it('parses the same window it detected in: a stale reset far up the capture is ignored (tail=12)', () => {
+    const pane = ['hit your limit · resets 11:30am (UTC)', ...Array(20).fill('● worked a while'),
+      "You've hit your weekly limit · resets Oct 9, 10am", '❯ '].join('\n');
+    assert.ok(findRateLimit(pane, [], 12)!.includes('Oct 9'));
+  });
+  it('prefers the reset time on the live banner over a stale one a few lines above', () => {
+    const text = ['hit your limit · resets 11:30am (UTC)', 'retrying…', 'hit your limit · resets 4:30pm (UTC)'].join('\n');
+    assert.ok(findRateLimit(text)!.includes('4:30pm'));
+  });
+  it('returns the custom-pattern line', () => {
+    assert.equal(findRateLimit('foo\nquota exhausted until 5pm\nbar', [/quota exhausted/i]), 'quota exhausted until 5pm');
   });
 });
 
@@ -467,5 +501,22 @@ describe('stripAnsi (OSC sequences)', () => {
   it('rate limit detection works through OSC hyperlinks', () => {
     const input = '\x1b]8;;link\x1b\\5-hour limit reached\x1b]8;;\x1b\\ - resets 3pm';
     assert.ok(isRateLimited(input));
+  });
+});
+
+describe('isNativeContinuing', () => {
+  it('detects the live auto-continue status rows', () => {
+    assert.equal(isNativeContinuing('Usage limit reached · limit resets 3:45pm\nContinuing automatically at 3:45pm · Esc to cancel\n❯ '), true);
+    assert.equal(isNativeContinuing('Continuing automatically when it resets · Esc to cancel'), true);
+    assert.equal(isNativeContinuing('Continuing shortly · Esc to cancel'), true);
+    assert.equal(isNativeContinuing('Continuing automatically at 3:45pm · esc to cancel'), true);
+  });
+  it('ignores the transcript notices native leaves behind and the menu footer', () => {
+    assert.equal(isNativeContinuing('Usage limit reached · continuing automatically at 3:45pm · esc to cancel'), false);
+    assert.equal(isNativeContinuing('Usage limit reset · Continuing automatically'), false);
+    assert.equal(isNativeContinuing('What do you want to do?\nEnter to confirm · Esc to cancel'), false);
+  });
+  it('ignores a row that scrolled out of the tail', () => {
+    assert.equal(isNativeContinuing(['Continuing automatically at 3:45pm · Esc to cancel', ...Array(15).fill('● work'), '❯ '].join('\n')), false);
   });
 });

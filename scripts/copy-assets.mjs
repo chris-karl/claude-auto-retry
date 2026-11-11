@@ -10,7 +10,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const dist = join(root, 'dist');
 
 mkdirSync(join(dist, 'src'), { recursive: true });
-for (const wrapper of ['wrapper.sh', 'wrapper.fish']) {
+for (const wrapper of ['wrapper.sh', 'wrapper.fish', 'wrapper.ps1']) {
   copyFileSync(join(root, 'src', wrapper), join(dist, 'src', wrapper));
 }
 copyFileSync(join(root, 'package.json'), join(dist, 'package.json'));

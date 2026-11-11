@@ -3,32 +3,7 @@ import assert from 'node:assert/strict';
 import { createMonitorState, processOneTick } from '../src/monitor.ts';
 import type { ScreenAdapter } from '../src/monitor.ts';
 import { DEFAULT_CONFIG } from '../src/config.ts';
-
-interface MockScreen extends ScreenAdapter {
-  _sent: string[];
-  _escaped: number;
-  _content: string;
-}
-
-// escapeShows: what the screen renders after an Escape (default: unchanged,
-// i.e. the Escape did not dismiss whatever is on screen).
-function mockScreen(screenContent = '', { failSend = false, escapeShows }: { failSend?: boolean; escapeShows?: string } = {}): MockScreen {
-  const s: MockScreen = {
-    _sent: [],
-    _escaped: 0,
-    _content: screenContent,
-    capture: async () => s._content,
-    send: async (text: string) => {
-      if (failSend) throw new Error('PTY destroyed');
-      s._sent.push(text);
-    },
-    sendEscape: async () => {
-      s._escaped++;
-      if (escapeShows !== undefined) s._content = escapeShows;
-    },
-  };
-  return s;
-}
+import { mockScreen } from './helpers.ts';
 
 const MENU = [
   '❯ /rate-limit-options',
@@ -201,16 +176,21 @@ describe('processOneTick', () => {
     assert.equal(s._escaped, 1, 'should press Escape to dismiss the menu');
     assert.equal(s._sent.length, 1, 'should submit the retry message');
   });
-  it('holds the retry when Escape fails to dismiss the menu', async () => {
+  it('holds the retry when Escape fails to dismiss the menu, consuming an attempt', async () => {
     const s = mockScreen(MENU); // Escape leaves the menu on screen
     const st = createMonitorState();
     st.waitUntil = Date.now() - 1000; st.status = 'waiting';
     assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'menu-still-up');
     assert.equal(s._escaped, 1);
     assert.equal(s._sent.length, 0, 'must not type into a live menu');
-    assert.equal(st.attempts, 0, 'no send happened, so no attempt consumed');
+    assert.equal(st.attempts, 1, 'the Escape counts as an attempt so a stuck menu cannot loop forever');
     assert.equal(st.status, 'waiting');
     assert.ok(st.waitUntil > Date.now(), 'cooldown set before the next dismissal try');
+    // A menu that never closes ends in max-retries, not an endless Escape loop.
+    for (let i = 1; i < DEFAULT_CONFIG.maxRetries; i++) { st.waitUntil = Date.now() - 1; await processOneTick(st, s, DEFAULT_CONFIG, () => true); }
+    st.waitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'max-retries');
+    assert.equal(s._escaped, DEFAULT_CONFIG.maxRetries);
   });
   it('does not press Escape when there is no menu (plain banner)', async () => {
     const s = mockScreen('5-hour limit reached - resets 3pm (UTC)');
@@ -318,5 +298,76 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
     assert.equal(s._sent.length, 0);
     assert.equal(st.status, 'monitoring');
+  });
+});
+
+describe('processOneTick — current Claude Code renders', () => {
+  it('does not enter a wait on the live usage gauge variants', async () => {
+    for (const gauge of [
+      "You've used 98% of your session limit · resets 8:40pm (Europe/Berlin)",
+      'Over 85% of your session limit used · resets 3:45pm',
+      'Approaching session limit · resets 3:45pm',
+    ]) {
+      const st = createMonitorState();
+      assert.equal(await processOneTick(st, mockScreen(`● Done.\n\n${gauge}\n❯ `), DEFAULT_CONFIG, () => true), 'monitoring', gauge);
+    }
+  });
+  it('does not enter a wait on prose or tool output saying "try again in N minutes"', async () => {
+    const s = mockScreen('● The deploy script said: too many requests, try again in 5 minutes. I will wait.\n❯ ');
+    assert.equal(await processOneTick(createMonitorState(), s, DEFAULT_CONFIG, () => true), 'monitoring');
+  });
+  it('routes an API error beside the usage gauge to the API-error path, not an hours-long wait', async () => {
+    const screen = [
+      '● API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment.',
+      '',
+      "You've used 85% of your session limit · resets 3:45pm",
+      '❯ ',
+    ].join('\n');
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, mockScreen(screen), DEFAULT_CONFIG, () => true), 'error-detected');
+    assert.equal(st.status, 'overload');
+  });
+  it('detects the terminal "Repeated 529" render as an overload', async () => {
+    const screen = '● API Error: Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary. Try again in a moment. If it persists, check https://status.claude.com.\n❯ ';
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, mockScreen(screen), DEFAULT_CONFIG, () => true), 'error-detected');
+    assert.equal(st.status, 'overload');
+  });
+  it('still enters the wait on the current status-row banner', async () => {
+    const st = createMonitorState();
+    assert.equal(await processOneTick(st, mockScreen('Usage limit reached · limit resets 3:45pm\n❯ '), DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(st.lastRateLimitMessage, 'Usage limit reached · limit resets 3:45pm');
+  });
+});
+
+describe("processOneTick — Claude Code's own auto-continue", () => {
+  const ARMED = ['Usage limit reached · limit resets 3:45pm', 'Continuing automatically at 3:45pm · Esc to cancel', '❯ '].join('\n');
+
+  it('holds the retry while native auto-continue is armed, then stands down when it fires', async () => {
+    const s = mockScreen(ARMED);
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting';
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'native-armed');
+    assert.equal(s._sent.length, 0);
+    assert.equal(s._escaped, 0, 'Escape would cancel the native wait');
+    assert.equal(st.attempts, 0);
+    assert.equal(st.status, 'waiting');
+    assert.ok(st.waitUntil > Date.now());
+    s._content = 'Usage limit reset · Continuing automatically\n✻ Working… (3s · esc to interrupt)';
+    st.waitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(st.status, 'monitoring');
+  });
+  it('retries once the native row is gone but the banner remains (cancelled or capped)', async () => {
+    const s = mockScreen(['Usage limit reached · limit resets 3:45pm', 'Automatic continue stopped after repeated usage-limit hits · /rate-limit-options to try again', '❯ '].join('\n'));
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting';
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'retried');
+  });
+  it('does not mistake the lingering transcript notice for an armed auto-continue', async () => {
+    const s = mockScreen(['Usage limit reached · continuing automatically at 3:45pm · esc to cancel', '● some work', 'Usage limit reached · limit resets 9:00pm', '❯ '].join('\n'));
+    const st = createMonitorState();
+    st.waitUntil = Date.now() - 1000; st.status = 'waiting';
+    assert.equal(await processOneTick(st, s, DEFAULT_CONFIG, () => true), 'retried');
   });
 });

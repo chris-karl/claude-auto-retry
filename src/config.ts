@@ -2,29 +2,15 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-// Transient API-error backoff (529 Overloaded / 500 / 503). Separate block from
-// the usage-limit knobs: those wait in *hours* until a reset, these wait in
-// *seconds* on an exponential backoff. See README "Overload backoff".
-export interface OverloadConfig {
+// One bounded re-send path for an API error Claude Code leaves on screen. Two
+// instances share it: `overload` (5xx/529 left after Claude Code's own retries,
+// minutes-scale backoff) and `safeguard` (a safeguards false positive, quick
+// re-send). Both are separate from the hours-scale usage-limit wait.
+export interface RetryConfig {
   enabled: boolean;
-  patterns: string[];
-  backoffSeconds: number[];
-  steadyStateSeconds: number;
-  jitterPct: number;
-  maxTotalWaitMinutes: number;
-  eventMaxAgeSeconds: number;
-  retryMessage: string;
-}
-
-// Safeguard / AUP false-positive retry. Distinct from usage limits (hours) and
-// overload (5xx, exponential): the model's safeguards flag a message — often a false
-// positive, so an immediate re-send usually clears it. Bounded by maxRetries so a
-// *sticky* flag can't loop forever. See README "Safeguard retry".
-export interface SafeguardConfig {
-  enabled: boolean;
-  patterns: string[];
+  patterns: string[];        // case-insensitive regexes, matched near an `API Error` line in the screen tail
+  backoffSeconds: number[];  // wait before each send; the last entry repeats
   maxRetries: number;
-  retryDelaySeconds: number;
   retryMessage: string;
 }
 
@@ -36,56 +22,32 @@ export interface Config {
   retryCooldownSeconds: number;
   retryMessage: string;
   customPatterns: string[];
-  overload: OverloadConfig;
-  safeguard: SafeguardConfig;
+  overload: RetryConfig;
+  safeguard: RetryConfig;
 }
 
-export const DEFAULT_OVERLOAD: OverloadConfig = {
+export const DEFAULT_OVERLOAD: RetryConfig = {
   enabled: true,
-  // Anchored to Claude Code's actual TERMINAL error render — NOT bare status numbers.
-  // A bare "503"/"529" matches ordinary code (res.status(503)), ports, byte counts and
-  // quoted logs, which is what caused false "Continue where you left off." injections
-  // upstream. Matched as case-insensitive regexes against only the screen tail
-  // (see overloadMatch in patterns.ts).
-  //
-  // Claude Code (verified against the v2.1.x binary) has TWO render forms:
-  //   terminal (retries exhausted):  "API Error: 529 {…}"  / "API Error: 503 no healthy upstream"
-  //   transient (still retrying):     "API Error (529 …) · Retrying in 5s · attempt 3/10"
-  // We REQUIRE the colon form to skip the parens form, and the retry SUFFIX
-  // ("· Retrying in…" / "attempt n/m") is separately suppressed by the working gate
-  // in patterns.ts — together they ensure we never interrupt Claude's own backoff.
+  // Anchored to Claude Code's terminal error render, never a bare status number: a
+  // bare "503" matches ordinary code and quoted logs. The in-progress form
+  // "API Error (529 …) · Retrying in 5s" has no colon and trips the working gate.
   patterns: [
-    // Terminal error line. Covers the full retryable set (429+5xx) in the colon form.
-    'API Error:\\s*(429|500|502|503|504|529)\\b',
-    // JSON error.type for a sustained overload (survives the collapsed non-JSON render).
+    'API Error:.*\\b(429|500|502|503|504|529)\\b',   // also "API Error: Repeated 529 Overloaded errors…"
     'overloaded_error',
-    // API-level 429 uses a dedicated render with no 3-digit code in the generic slot:
-    //   "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"
-    'temporarily limiting requests',
+    'temporarily limiting requests',   // API-level 429 render, no status code in the slot
   ],
   backoffSeconds: [30, 60, 120, 240, 300],
-  steadyStateSeconds: 300,
-  jitterPct: 15,
-  maxTotalWaitMinutes: 120,
-  // StopFailure event markers older than this are ignored (guards against a stale
-  // marker left behind by an earlier session replaying a failure).
-  eventMaxAgeSeconds: 120,
+  maxRetries: 20,
   retryMessage: 'Continue where you left off.',
 };
 
-export const DEFAULT_SAFEGUARD: SafeguardConfig = {
+export const DEFAULT_SAFEGUARD: RetryConfig = {
   enabled: true,
-  // Case-insensitive regexes matched against the screen tail; a match only counts with
-  // an `API Error` line nearby (see safeguardMatch) so quoting/discussing these phrases
-  // in conversation can't trigger a retry. Match the stable phrases of the render, not
-  // the model name (which varies).
-  patterns: [
-    'safeguards flagged this message',
-    "can't respond to this request with",   // "Claude Code can't respond to this request with <model>"
-    'legal/aup',                            // the AUP link Anthropic includes
-  ],
-  maxRetries: 3,          // small — if it keeps flagging, retrying won't help
-  retryDelaySeconds: 8,   // brief pause between re-sends (semi-random flag; quick retry helps)
+  // "API Error: <model>'s safeguards flagged this message (…/legal/aup). … Claude Code
+  // can't respond to this request with <model>." Match the stable phrases, not the model.
+  patterns: ['safeguards flagged this message', "can't respond to this request with", 'legal/aup'],
+  backoffSeconds: [8],
+  maxRetries: 3,   // a flag that survives three re-sends is sticky; retrying won't help
   retryMessage: 'continue',
 };
 
@@ -107,11 +69,6 @@ function validNumber(val: unknown, min: number, fallback: number): number {
   return typeof val === 'number' && Number.isFinite(val) && val >= min ? val : fallback;
 }
 
-function clamp(val: unknown, lo: number, hi: number, fallback: number): number {
-  if (typeof val !== 'number' || !Number.isFinite(val)) return fallback;
-  return Math.min(hi, Math.max(lo, val));
-}
-
 // A pattern is usable only if it's a non-empty string that compiles as a regex: a
 // typo can't then crash a monitor tick, and an empty string (which compiles but
 // matches every line) can't turn into a permanent false positive.
@@ -120,76 +77,41 @@ function isUsablePattern(p: unknown): p is string {
   try { new RegExp(p); return true; } catch { return false; }
 }
 
-function validPatterns(raw: unknown, fallback: string[]): string[] {
-  const pats = Array.isArray(raw) ? raw.filter(isUsablePattern) : [];
-  return pats.length > 0 ? pats : [...fallback];
-}
-
-function validateOverload(raw: unknown): OverloadConfig {
-  // Shallow-merge so a partial user block keeps the documented defaults for the
-  // keys it omits.
-  const o = { ...DEFAULT_OVERLOAD, ...(raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}) } as OverloadConfig;
-
-  o.enabled = typeof o.enabled === 'boolean' ? o.enabled : DEFAULT_OVERLOAD.enabled;
-  o.patterns = validPatterns(o.patterns, DEFAULT_OVERLOAD.patterns);
-
-  const backoff = Array.isArray(o.backoffSeconds)
-    ? o.backoffSeconds.filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0)
+function validateRetry(raw: unknown, defaults: RetryConfig): RetryConfig {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const patterns = Array.isArray(r.patterns) ? r.patterns.filter(isUsablePattern) : [];
+  const backoff = Array.isArray(r.backoffSeconds)
+    ? r.backoffSeconds.filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0)
     : [];
-  o.backoffSeconds = backoff.length > 0 ? backoff : [...DEFAULT_OVERLOAD.backoffSeconds];
-
-  o.steadyStateSeconds = validNumber(o.steadyStateSeconds, 1, DEFAULT_OVERLOAD.steadyStateSeconds);
-  o.jitterPct = clamp(o.jitterPct, 0, 100, DEFAULT_OVERLOAD.jitterPct);
-  o.maxTotalWaitMinutes = validNumber(o.maxTotalWaitMinutes, 0.1, DEFAULT_OVERLOAD.maxTotalWaitMinutes);
-  o.eventMaxAgeSeconds = validNumber(o.eventMaxAgeSeconds, 1, DEFAULT_OVERLOAD.eventMaxAgeSeconds);
-
-  if (typeof o.retryMessage !== 'string' || !o.retryMessage) {
-    o.retryMessage = DEFAULT_OVERLOAD.retryMessage;
-  }
-  return o;
+  return {
+    enabled: typeof r.enabled === 'boolean' ? r.enabled : defaults.enabled,
+    patterns: patterns.length > 0 ? patterns : [...defaults.patterns],
+    backoffSeconds: backoff.length > 0 ? backoff : [...defaults.backoffSeconds],
+    maxRetries: validNumber(r.maxRetries, 1, defaults.maxRetries),
+    retryMessage: typeof r.retryMessage === 'string' && r.retryMessage ? r.retryMessage : defaults.retryMessage,
+  };
 }
 
-function validateSafeguard(raw: unknown): SafeguardConfig {
-  const s = { ...DEFAULT_SAFEGUARD, ...(raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}) } as SafeguardConfig;
-  s.enabled = typeof s.enabled === 'boolean' ? s.enabled : DEFAULT_SAFEGUARD.enabled;
-  s.patterns = validPatterns(s.patterns, DEFAULT_SAFEGUARD.patterns);
-  s.maxRetries = validNumber(s.maxRetries, 1, DEFAULT_SAFEGUARD.maxRetries);
-  s.retryDelaySeconds = validNumber(s.retryDelaySeconds, 1, DEFAULT_SAFEGUARD.retryDelaySeconds);
-  if (typeof s.retryMessage !== 'string' || !s.retryMessage) {
-    s.retryMessage = DEFAULT_SAFEGUARD.retryMessage;
-  }
-  return s;
-}
-
-// Build a clean Config from arbitrary JSON: every field is range-checked and
-// falls back to its default, so a malformed config can never produce NaN/
-// undefined behavior downstream.
+// Build a clean Config from arbitrary JSON: every field is range-checked and falls
+// back to its default, so a malformed config can never produce NaN downstream.
 function validate(raw: Record<string, unknown>): Config {
-  const customPatterns = Array.isArray(raw.customPatterns)
-    ? raw.customPatterns.filter(isUsablePattern)
-    : DEFAULT_CONFIG.customPatterns;
-
   return {
     maxRetries: validNumber(raw.maxRetries, 1, DEFAULT_CONFIG.maxRetries),
     pollIntervalSeconds: validNumber(raw.pollIntervalSeconds, 1, DEFAULT_CONFIG.pollIntervalSeconds),
     marginSeconds: validNumber(raw.marginSeconds, 0, DEFAULT_CONFIG.marginSeconds),
     fallbackWaitHours: validNumber(raw.fallbackWaitHours, 0.1, DEFAULT_CONFIG.fallbackWaitHours),
     retryCooldownSeconds: validNumber(raw.retryCooldownSeconds, 1, DEFAULT_CONFIG.retryCooldownSeconds),
-    retryMessage: typeof raw.retryMessage === 'string' && raw.retryMessage
-      ? raw.retryMessage
-      : DEFAULT_CONFIG.retryMessage,
-    customPatterns,
-    overload: validateOverload(raw.overload),
-    safeguard: validateSafeguard(raw.safeguard),
+    retryMessage: typeof raw.retryMessage === 'string' && raw.retryMessage ? raw.retryMessage : DEFAULT_CONFIG.retryMessage,
+    customPatterns: Array.isArray(raw.customPatterns) ? raw.customPatterns.filter(isUsablePattern) : [],
+    overload: validateRetry(raw.overload, DEFAULT_OVERLOAD),
+    safeguard: validateRetry(raw.safeguard, DEFAULT_SAFEGUARD),
   };
 }
 
 export async function loadConfig(path: string = CONFIG_PATH): Promise<Config> {
   try {
-    const raw = await readFile(path, 'utf-8');
-    // Spreading over DEFAULT_CONFIG neutralizes a non-object payload (a bare
-    // number/null parses but spreads to nothing) before validation.
-    return validate({ ...DEFAULT_CONFIG, ...JSON.parse(raw) });
+    const raw = JSON.parse(await readFile(path, 'utf-8'));
+    return validate(raw && typeof raw === 'object' ? raw : {});
   } catch {
     return { ...DEFAULT_CONFIG };
   }

@@ -12,8 +12,8 @@ updates:
       # Every day at 5:30
       cronjob: "30 5 * * *"
       timezone: "Europe/Berlin"
-    allow:
-      - dependency-type: "all"
+    # Direct dependencies only (the default): the tarball ships no lockfile, so
+    # transitive pins affect CI alone and move with their parent anyway.
     groups:
       non-major-updates:
         applies-to: version-updates

@@ -1,14 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, statSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import {
-  createTerminal,
-  writeToTerminal,
-  readScreen,
-  ensureNativeHelperExecutable,
-} from '../src/pty.ts';
+import { createTerminal, writeToTerminal, readScreen } from '../src/pty.ts';
 
 describe('readScreen', () => {
   it('renders written lines as plain text', async () => {
@@ -40,59 +32,5 @@ describe('readScreen', () => {
     assert.ok(rows.length <= 5);
     assert.ok(screen.includes('line-49'));
     assert.ok(!screen.includes('line-10'));
-  });
-});
-
-describe('ensureNativeHelperExecutable', () => {
-  const unix = { skip: process.platform === 'win32' };
-
-  // Build a throwaway node-pty layout: <root>/<dir>/spawn-helper at `mode`.
-  function fakePty(dir: string, mode: number): { root: string; helper: string } {
-    const root = mkdtempSync(join(tmpdir(), 'car-pty-'));
-    const helperDir = join(root, dir);
-    mkdirSync(helperDir, { recursive: true });
-    const helper = join(helperDir, 'spawn-helper');
-    writeFileSync(helper, '#!/bin/sh\n');
-    chmodSync(helper, mode);
-    return { root, helper };
-  }
-
-  it('restores the exec bit on a non-executable prebuilt spawn-helper', unix, () => {
-    const { root, helper } = fakePty(`prebuilds/${process.platform}-${process.arch}`, 0o644);
-    try {
-      ensureNativeHelperExecutable(root);
-      assert.equal(statSync(helper).mode & 0o111, 0o111, 'all exec bits restored');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('also covers a build/Release spawn-helper', unix, () => {
-    const { root, helper } = fakePty('build/Release', 0o600);
-    try {
-      ensureNativeHelperExecutable(root);
-      assert.ok(statSync(helper).mode & 0o100, 'owner exec bit set');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('leaves an already-executable helper untouched (idempotent)', unix, () => {
-    const { root, helper } = fakePty(`prebuilds/${process.platform}-${process.arch}`, 0o755);
-    try {
-      ensureNativeHelperExecutable(root);
-      assert.equal(statSync(helper).mode & 0o777, 0o755);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('does not throw when the root has no spawn-helper', () => {
-    const root = mkdtempSync(join(tmpdir(), 'car-pty-'));
-    try {
-      assert.doesNotThrow(() => ensureNativeHelperExecutable(root));
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
   });
 });

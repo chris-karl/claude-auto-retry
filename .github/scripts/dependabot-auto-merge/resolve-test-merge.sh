@@ -38,19 +38,8 @@ else
   head_sha=$EXPECTED_HEAD
 fi
 
-# A .github/-only PR cannot affect anything the checks read.
-files=$(gh api "repos/$GH_REPO/pulls/$pr/files" --paginate --jq '.[].filename')
-outside_ci=$(printf '%s\n' "$files" | grep -v '^\.github/' || true)
-if [ -z "$outside_ci" ]; then
-  echo "PR #$pr only touches .github/, skipping the checks"
-  skip_check=true
-else
-  skip_check=false
-fi
-
 {
   echo "pr=$pr"
   echo "merge_sha=$merge_sha"
   echo "head_sha=$head_sha"
-  echo "skip_check=$skip_check"
 } >> "$GITHUB_OUTPUT"

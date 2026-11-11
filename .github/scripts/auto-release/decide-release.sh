@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # Emit release/tag outputs: auto mode releases only Dependabot-authored
-# changes, manual mode ($BUMP = patch/minor/major) unconditionally.
+# changes to shipped content, release mode ($MODE=release) releases the
+# pinned commit unconditionally.
 set -eu
 
 # Refuse to run on anything but the pinned $EXPECTED_COMMIT (abbreviated
@@ -27,29 +28,24 @@ if [ -n "${EXPECTED_COMMIT:-}" ]; then
   esac
 fi
 
-# Emit the release outputs for the next tag ($1 = bump component,
-# $2 = optional log suffix), or fail with compute-next-tag.sh's
-# ::error:: diagnostic (captured on stdout).
+# Emit the release outputs for the next tag ($1 = optional log suffix).
 emit_release() {
-  if ! next_tag=$(BUMP="$1" "$(dirname "$0")/compute-next-tag.sh"); then
-    echo "$next_tag"
-    exit 1
-  fi
-  echo "Releasing $next_tag${2:+ ($2)}"
+  next_tag=$("$(dirname "$0")/compute-next-tag.sh")
+  echo "Releasing $next_tag${1:+ ($1)}"
   {
     echo "release=true"
     echo "tag=$next_tag"
   } >> "$GITHUB_OUTPUT"
 }
 
-if [ "${BUMP:-auto}" != "auto" ]; then
+if [ "${MODE:-auto}" = "release" ]; then
   # An accidental double dispatch must not cut a second release.
   released_as=$(git tag -l 'v*' --points-at HEAD)
   if [ -n "$released_as" ]; then
     echo "::error::Commit $(git rev-parse HEAD) is already released as $released_as"
     exit 1
   fi
-  emit_release "$BUMP" "manually requested $BUMP bump"
+  emit_release "manually requested"
   exit 0
 fi
 
@@ -61,30 +57,29 @@ if ! last_tag=$(git describe --tags --abbrev=0 2> /dev/null); then
   exit 0
 fi
 
-# Paths that never affect the released code; a list of only negative
-# pathspecs matches everything else.
-set -- \
-  ':(exclude).github/' \
-  ':(exclude)LICENSE' \
-  ':(exclude)README.md' \
-  ':(exclude)CLAUDE.md' \
-  ':(exclude).gitignore'
-
-if [ -z "$(git diff --name-only "$last_tag"..HEAD -- "$@")" ]; then
-  echo "No release-relevant changes since $last_tag, nothing to release"
+# Only what the tarball ships can warrant a release: the compiled sources,
+# the build inputs and the runtime dependency ranges. Lockfile-only and
+# dev-only bumps change nothing for an installer.
+shipped="src bin scripts tsconfig.json tsconfig.build.json"
+shipped_manifest() { git show "$1:package.json" | jq -cS "{dependencies, engines, bin, files}"; }
+# shellcheck disable=SC2086 # $shipped is a word list
+if [ -z "$(git diff --name-only "$last_tag"..HEAD -- $shipped)" ] \
+   && [ "$(shipped_manifest "$last_tag")" = "$(shipped_manifest HEAD)" ]; then
+  echo "No shipped-content changes since $last_tag, nothing to release"
   echo "release=false" >> "$GITHUB_OUTPUT"
   exit 0
 fi
 # The bot email covers version bump commits from a failed earlier run.
 # No pipe into sort: set -e cannot see a pipe's left side.
-author_emails=$(git log "$last_tag"..HEAD --format='%ae' -- "$@")
-unexpected=$(printf '%s\n' "$author_emails" | sort -u | grep -Fxv \
-  -e '49699333+dependabot[bot]@users.noreply.github.com' \
-  -e '41898282+github-actions[bot]@users.noreply.github.com' || true)
+# shellcheck disable=SC2086
+author_emails=$(git log "$last_tag"..HEAD --format="%ae" -- $shipped package.json)
+unexpected=$(printf "%s\n" "$author_emails" | sort -u | grep -Fxv \
+  -e "49699333+dependabot[bot]@users.noreply.github.com" \
+  -e "41898282+github-actions[bot]@users.noreply.github.com" || true)
 if [ -n "$unexpected" ]; then
-  echo "Release-relevant commits since $last_tag are not exclusively authored by Dependabot, skipping auto-release. Unexpected authors:"
+  echo "Shipped-content commits since $last_tag are not exclusively authored by Dependabot, skipping auto-release. Unexpected authors:"
   echo "$unexpected"
   echo "release=false" >> "$GITHUB_OUTPUT"
   exit 0
 fi
-emit_release patch
+emit_release

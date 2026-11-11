@@ -36,8 +36,7 @@ jobs:
       pr: ${{ steps.resolve.outputs.pr }}
       merge_sha: ${{ steps.resolve.outputs.merge_sha }}
       head_sha: ${{ steps.resolve.outputs.head_sha }}
-      skip_check: ${{ steps.resolve.outputs.skip_check }}
-      update_type: ${{ steps.metadata.outputs.update-type }}
+      runtime_majors: ${{ steps.gate.outputs.runtime_majors }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -71,12 +70,21 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # CI never loads node-pty, so a major bump of a shipped (production)
+      # dependency is left to a human; everything else merges on green.
+      - name: List runtime dependencies bumped by a major version
+        if: github.event_name == 'pull_request'
+        id: gate
+        env:
+          UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+        run: .github/scripts/dependabot-auto-merge/runtime-majors.sh
+
   # The merge gate: run-checks.yml on the resolved test merge, so a
-  # dispatch retry after main moved validates the fresh combination.
+  # dispatch retry after main moved validates the fresh combination. A
+  # .github/-only PR runs them too: that is what exercises an action bump.
   check:
     needs: resolve-test-merge
-    # CI-only PRs skip the checks.
-    if: needs.resolve-test-merge.outputs.merge_sha != '' && needs.resolve-test-merge.outputs.skip_check != 'true'
+    if: needs.resolve-test-merge.outputs.merge_sha != ''
     permissions:
       contents: read
     uses: ./.github/workflows/run-checks.yml
@@ -85,11 +93,10 @@ jobs:
 
   merge:
     needs: [resolve-test-merge, check]
-    # The checks may have been skipped (CI-only PR), but not failed.
     if: >-
       !cancelled() &&
       needs.resolve-test-merge.outputs.pr != '' &&
-      (needs.check.result == 'success' || needs.check.result == 'skipped')
+      needs.check.result == 'success'
     runs-on: ubuntu-latest
     # The only job that writes: it squash-merges the PR and dispatches the
     # follow-up workflows.
@@ -105,9 +112,9 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
-      # Dispatch retries already passed the non-major check once.
-      - name: Merge non-major updates
-        if: github.event_name == 'workflow_dispatch' || needs.resolve-test-merge.outputs.update_type != 'version-update:semver-major'
+      # Dispatch retries already passed the runtime-major gate once.
+      - name: Merge the update
+        if: github.event_name == 'workflow_dispatch' || needs.resolve-test-merge.outputs.runtime_majors == ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -115,3 +122,14 @@ jobs:
           MERGE_SHA: ${{ needs.resolve-test-merge.outputs.merge_sha }}
           HEAD_SHA: ${{ needs.resolve-test-merge.outputs.head_sha }}
         run: .github/scripts/dependabot-auto-merge/merge-pr.sh
+
+      - name: Leave a runtime major bump to a human
+        if: github.event_name == 'pull_request' && needs.resolve-test-merge.outputs.runtime_majors != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ needs.resolve-test-merge.outputs.pr }}
+          RUNTIME_MAJORS: ${{ needs.resolve-test-merge.outputs.runtime_majors }}
+        run: >-
+          gh pr comment "$PR" --body
+          "Not merged automatically: major update of the runtime dependency $RUNTIME_MAJORS. The checks passed; review its changelog and merge by hand."

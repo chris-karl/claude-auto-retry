@@ -1,17 +1,9 @@
 import { spawn } from 'node:child_process';
-import { isRateLimited } from './patterns.ts';
-import { parseResetTime, calculateWaitMs } from './time-parser.ts';
 import { loadConfig } from './config.ts';
 import { createLogger } from './logger.ts';
 import { runMonitor } from './monitor.ts';
 import type { ScreenAdapter } from './monitor.ts';
-import { readStopFailureEvent, clearStopFailureEvent } from './events.ts';
-import {
-  spawnPty,
-  createTerminal,
-  readScreen,
-  findClaudeBinary,
-} from './pty.ts';
+import { spawnPty, createTerminal, readScreen, findClaudeBinary } from './pty.ts';
 
 // Gap between typing the retry text and the submitting Enter. Claude Code's Ink
 // TUI treats text + Enter arriving in one burst as a PASTE (the Enter becomes a
@@ -20,10 +12,6 @@ import {
 const SUBMIT_DELAY_MS = 300;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-function isPrintMode(args: string[]): boolean {
-  return args.includes('-p') || args.includes('--print');
-}
 
 // Optional launch wrapper. Set CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER to a prefix command
 // (e.g. "caffeinate -i" on macOS to keep the machine awake, or "nice") and it is
@@ -40,7 +28,6 @@ export function resolveLaunchCommand(
   return { cmd: toks[0], cmdArgs: [...toks.slice(1), claudeBin, ...args] };
 }
 
-// Current terminal size, with sane fallbacks when stdout is not a TTY.
 function termSize(): { cols: number; rows: number } {
   return { cols: process.stdout.columns || 80, rows: process.stdout.rows || 30 };
 }
@@ -58,16 +45,6 @@ function toExitCode(code: number | null | undefined, signal: string | number | n
   return code ?? (signal ? 1 : 0);
 }
 
-// Resolve buffered output to the underlying fd before the process exits. A bare
-// process.stdout.write() to a pipe/file is async; exiting before it flushes
-// truncates the tail. Awaiting the write callback makes the flush deterministic.
-function writeFlush(stream: NodeJS.WritableStream, data: string): Promise<void> {
-  return new Promise((resolve) => {
-    if (!data) { resolve(); return; }
-    stream.write(data, () => resolve());
-  });
-}
-
 // Interactive mode: run Claude inside a PTY we own, mirror it to the real
 // terminal, render its output into a headless emulator for detection, and let
 // the monitor type the retry message straight into the PTY when needed.
@@ -75,12 +52,7 @@ async function launchInteractive(args: string[]): Promise<number> {
   const claudeBin = findClaudeBinary();
   const config = await loadConfig();
   const logger = createLogger();
-
   const { cols, rows } = termSize();
-
-  // Session key for the StopFailure event channel: stamped onto claude's env so the
-  // hook (a child of claude) inherits it and writes a marker the monitor can read.
-  const sessionKey = String(process.pid);
 
   let term, child;
   try {
@@ -89,7 +61,7 @@ async function launchInteractive(args: string[]): Promise<number> {
     child = await spawnPty(cmd, cmdArgs, {
       cols, rows,
       cwd: process.cwd(),
-      env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1', CLAUDE_AUTO_RETRY_SESSION: sessionKey },
+      env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1' },
     });
   } catch (err) {
     process.stderr.write(`[claude-auto-retry] Failed to start PTY: ${(err as Error).message}\n`);
@@ -103,17 +75,14 @@ async function launchInteractive(args: string[]): Promise<number> {
     term.write(data);
   });
 
-  // Real terminal input -> PTY. Raw mode so keystrokes (incl. Ctrl-C) pass
-  // through to Claude untouched.
+  // Real terminal input -> PTY, in raw mode so every keystroke (incl. Ctrl-C) passes
+  // through to Claude untouched. Forward the raw Buffer: a multibyte codepoint or a
+  // paste can be split across two 'data' events, and decoding each chunk alone would
+  // emit U+FFFD. node-pty copies the bytes verbatim (its write type says string).
   const stdin = process.stdin;
   const wasRaw = !!stdin.isRaw;
-  if (stdin.isTTY) stdin.setRawMode(true);
+  stdin.setRawMode(true);
   stdin.resume();
-  // Forward the raw Buffer, not a per-chunk utf8 string: a multibyte codepoint
-  // (or a paste) can be split across two 'data' events, and decoding each chunk
-  // independently would emit U+FFFD for the partial bytes. node-pty copies the
-  // bytes verbatim, keeping the mirror transparent (its write type says string,
-  // but it accepts a Buffer at runtime).
   const onStdin = (d: Buffer): void => { try { child.write(d as unknown as string); } catch { /* PTY gone */ } };
   stdin.on('data', onStdin);
 
@@ -132,17 +101,15 @@ async function launchInteractive(args: string[]): Promise<number> {
     if (cleaned) return;
     cleaned = true;
     stdin.off('data', onStdin);
-    if (stdin.isTTY) { try { stdin.setRawMode(wasRaw); } catch { /* not a TTY */ } }
+    try { stdin.setRawMode(wasRaw); } catch { /* TTY gone */ }
     stdin.pause();
     process.stdout.off('resize', onResize);
   };
 
-  // Terminal close / kill: tear down the child PTY. In raw-TTY mode Ctrl-C
-  // arrives as a 0x03 byte forwarded into the PTY, so we must NOT trap SIGINT
-  // there. But when stdin is not a TTY (piped input) the terminal still raises
-  // SIGINT to our process group, so we trap it to kill the child. Trapping
-  // overrides Node's default-terminate, so we guarantee exit: restore the
-  // terminal and arm an unref'd fallback that force-kills if the signal is slow.
+  // Terminal close / kill: tear down the child PTY. Ctrl-C arrives as a 0x03 byte
+  // through the raw TTY, so SIGINT is not trapped. Trapping overrides Node's
+  // default-terminate, so guarantee exit: restore the terminal and arm an unref'd
+  // fallback that force-kills if the signal is slow.
   let signalFallback: ReturnType<typeof setTimeout> | null = null;
   const onSignal = (sig: NodeJS.Signals): void => {
     try { child.kill(sig); } catch { /* already dead */ }
@@ -155,8 +122,7 @@ async function launchInteractive(args: string[]): Promise<number> {
       signalFallback.unref();
     }
   };
-  const signals: NodeJS.Signals[] = stdin.isTTY ? ['SIGTERM', 'SIGHUP'] : ['SIGINT', 'SIGTERM', 'SIGHUP'];
-  for (const sig of signals) process.on(sig, () => onSignal(sig));
+  for (const sig of ['SIGTERM', 'SIGHUP'] as NodeJS.Signals[]) process.on(sig, () => onSignal(sig));
 
   let exited = false;
   const isAlive = (): boolean => !exited;
@@ -174,14 +140,11 @@ async function launchInteractive(args: string[]): Promise<number> {
     // submit the retry (the menu's highlighted option varies, so a bare Enter
     // could confirm "Upgrade your plan").
     sendEscape: async () => { child.write('\x1b'); },
-    // StopFailure event channel (see src/events.ts): fresh markers written by the
-    // hook for this session, consumed by the monitor's event-driven overload path.
-    readEvent: () => readStopFailureEvent(sessionKey, config.overload.eventMaxAgeSeconds * 1000),
-    clearEvent: () => clearStopFailureEvent(sessionKey),
   };
 
   const stopMonitor = runMonitor(screen, config, logger, isAlive);
-  await logger.info(`Monitor started (claude PID: ${child.pid})`);
+  // Logging is best-effort: an unwritable log directory must not take the session down.
+  logger.info(`Monitor started (claude PID: ${child.pid})`).catch(() => {});
 
   return new Promise((resolve) => {
     child.onExit(({ exitCode, signal }) => {
@@ -189,16 +152,14 @@ async function launchInteractive(args: string[]): Promise<number> {
       stopMonitor();
       if (signalFallback) { clearTimeout(signalFallback); signalFallback = null; }
       restoreTerminal();
-      // Best-effort marker cleanup so a recycled PID can't replay this session's failure.
-      clearStopFailureEvent(sessionKey).catch(() => {});
       logger.info('Claude exited. Monitor shutting down.').catch(() => {});
       resolve(toExitCode(exitCode, signal));
     });
   });
 }
 
-// Last-resort fallback if the PTY can't be created: run claude directly with
-// inherited stdio. No monitoring, but the user still gets a working session.
+// Run claude directly with inherited stdio: no monitoring, but a working session.
+// Used for --print mode, piped stdio, and when the PTY can't be created.
 function runPlain(claudeBin: string, args: string[]): Promise<number> {
   const { cmd, cmdArgs } = resolveLaunchCommand(claudeBin, args);
   const claude = spawn(cmd, cmdArgs, {
@@ -217,73 +178,15 @@ function runPlain(claudeBin: string, args: string[]): Promise<number> {
   });
 }
 
-// --print mode: non-interactive. Buffer output, and if rate-limited, discard the
-// partial output, wait, and re-run with the same args. No PTY needed.
-async function launchPrintMode(args: string[]): Promise<number> {
-  const claudeBin = findClaudeBinary();
-  const config = await loadConfig();
-  let retries = 0;
-
-  for (;;) {
-    const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
-      const chunks: Buffer[] = [];
-      const errChunks: Buffer[] = [];
-      const claude = spawn(claudeBin, args, {
-        stdio: ['inherit', 'pipe', 'pipe'],
-        env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1' },
-      });
-
-      claude.stdout.on('data', (d) => chunks.push(d));
-      claude.stderr.on('data', (d) => errChunks.push(d));
-      claude.on('error', (err) => {
-        resolve({ code: 1, stdout: '', stderr: err.message });
-      });
-      claude.on('exit', (code, signal) => {
-        resolve({
-          code: toExitCode(code, signal),
-          stdout: Buffer.concat(chunks).toString(),
-          stderr: Buffer.concat(errChunks).toString(),
-        });
-      });
-    });
-
-    const combined = result.stdout + result.stderr;
-
-    if (!isRateLimited(combined, config.customPatterns)) {
-      // Clean exit — write buffered output, flushing before we return so the tail
-      // isn't truncated when stdout/stderr is a pipe or file.
-      await writeFlush(process.stdout, result.stdout);
-      await writeFlush(process.stderr, result.stderr);
-      return result.code;
-    }
-
-    // Rate limited — discard buffer, wait and retry.
-    retries++;
-    if (retries > config.maxRetries) {
-      process.stderr.write(`[claude-auto-retry] Max retries (${config.maxRetries}) reached.\n`);
-      // Surface claude's own exit code where meaningful, but never report success
-      // after giving up.
-      return result.code || 1;
-    }
-
-    const parsed = parseResetTime(combined);
-    const waitMs = calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
-
-    process.stderr.write(`[claude-auto-retry] Rate limited. Waiting ${Math.round(waitMs / 1000)}s before retry ${retries}/${config.maxRetries}...\n`);
-    await sleep(waitMs);
-  }
-}
-
 // Main — only when executed directly (`node launcher.ts …`), never when imported
 // for its exported helpers (tests). Set process.exitCode rather than calling
 // process.exit(): exit() would tear down the event loop before buffered (non-TTY)
 // writes flush, truncating output.
 if (/[/\\]launcher\.(ts|js)$/.test(process.argv[1] ?? '')) {
   const args = process.argv.slice(2);
-
-  if (isPrintMode(args)) {
-    process.exitCode = await launchPrintMode(args);
-  } else {
-    process.exitCode = await launchInteractive(args);
-  }
+  // Monitoring needs a real terminal on both ends: --print mode has no screen to
+  // type into, and piped stdio would only pick up the PTY's CRLF line endings.
+  const interactive = process.stdin.isTTY && process.stdout.isTTY
+    && !args.includes('-p') && !args.includes('--print');
+  process.exitCode = interactive ? await launchInteractive(args) : await runPlain(findClaudeBinary(), args);
 }

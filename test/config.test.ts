@@ -1,17 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { loadConfig, DEFAULT_CONFIG } from '../src/config.ts';
-import type { Config } from '../src/config.ts';
-
-async function loadFromRaw(raw: string): Promise<Config> {
-  const dir = await mkdtemp(join(tmpdir(), 'car-cfg-'));
-  const f = join(dir, 'config.json');
-  await writeFile(f, raw);
-  try { return await loadConfig(f); } finally { await rm(dir, { recursive: true, force: true }); }
-}
+import { loadFromRaw } from './helpers.ts';
 
 describe('DEFAULT_CONFIG', () => {
   it('has expected defaults', () => {
@@ -35,9 +25,9 @@ describe('loadConfig', () => {
     assert.equal(config.maxRetries, 10);
     assert.equal(config.pollIntervalSeconds, 5);
   });
-  it('returns defaults for invalid JSON', async () => {
-    const config = await loadFromRaw('not json{{{');
-    assert.deepEqual(config, DEFAULT_CONFIG);
+  it('returns defaults for invalid JSON or a non-object payload', async () => {
+    assert.deepEqual(await loadFromRaw('not json{{{'), DEFAULT_CONFIG);
+    assert.deepEqual(await loadFromRaw('42'), DEFAULT_CONFIG);
   });
   it('rejects string values and falls back to defaults', async () => {
     const config = await loadFromRaw(JSON.stringify({ maxRetries: "never", pollIntervalSeconds: "fast" }));

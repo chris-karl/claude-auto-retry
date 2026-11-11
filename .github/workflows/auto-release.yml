@@ -5,19 +5,18 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      # "auto" releases only Dependabot-authored changes as the next
-      # patch; any other value releases the current main unconditionally
-      # with that component bumped (how human changes get released).
-      bump:
-        description: 'Optional — version component to bump for a manual release'
+      # "auto" releases only Dependabot-authored changes to shipped
+      # content; "release" releases the pinned commit unconditionally (how
+      # human changes get released). Versions are YYYY.M.N, N counting the
+      # month's releases from 0.
+      mode:
+        description: 'auto (Dependabot-only) or release (release this commit)'
         required: false
         type: choice
         default: auto
         options:
           - auto
-          - patch
-          - minor
-          - major
+          - release
       # Safety pin: main must point at this SHA or the run aborts — a
       # release never silently includes more than what was reviewed.
       commit:
@@ -53,7 +52,7 @@ jobs:
       - name: Decide whether a release should happen and which tag it gets
         id: decide
         env:
-          BUMP: ${{ inputs.bump }}
+          MODE: ${{ inputs.mode }}
           EXPECTED_COMMIT: ${{ inputs.commit }}
         run: .github/scripts/auto-release/decide-release.sh
 

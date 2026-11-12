@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DEFAULT_LOG_DIR, todayFile } from '../src/logger.ts';
-import { INSTALL_COMMAND } from '../src/update-check.ts';
+import { INSTALL_COMMAND, checkNow } from '../src/update-check.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -188,6 +188,16 @@ async function cmdLogs(): Promise<void> {
   }
 }
 
+async function cmdCheckUpdate(): Promise<void> {
+  const message = await checkNow();
+  if (message) {
+    console.log(message);
+  } else {
+    console.error('Could not get the latest release number from GitHub.');
+    process.exitCode = 1;
+  }
+}
+
 async function cmdVersion(): Promise<void> {
   try {
     const pkg = JSON.parse(await readFile(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -207,6 +217,7 @@ function printHelp(stream: NodeJS.WritableStream = process.stdout): void {
     '  claude-auto-retry uninstall          Remove shell wrapper\n' +
     '  claude-auto-retry status             Show monitor status\n' +
     "  claude-auto-retry logs               Tail today's log\n" +
+    '  claude-auto-retry check-update       Check for a newer release\n' +
     '  claude-auto-retry version            Print version\n'
   );
 }
@@ -217,6 +228,7 @@ export async function main(command: string | undefined): Promise<void> {
     case 'uninstall': await cmdUninstall(); break;
     case 'status': await cmdStatus(); break;
     case 'logs': await cmdLogs(); break;
+    case 'check-update': await cmdCheckUpdate(); break;
     case 'version': case '--version': case '-v': await cmdVersion(); break;
     case undefined: case 'help': case '--help': case '-h': printHelp(); break;
     default:

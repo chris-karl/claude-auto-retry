@@ -24,11 +24,12 @@ export function isNewer(latest: string, current: string): boolean {
 
 // releases/latest redirects to releases/tag/<version>: the Location header is
 // the answer, with no API rate limit and no body to parse.
-async function fetchLatestVersion(signal: AbortSignal): Promise<string | null> {
+async function fetchLatestVersion(signal?: AbortSignal): Promise<string | null> {
+  const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
   const res = await fetch(`${RELEASES_URL}/latest`, {
     method: 'HEAD',
     redirect: 'manual',
-    signal: AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   return /\/tag\/(\d+\.\d+\.\d+)$/.exec(res.headers.get('location') ?? '')?.[1] ?? null;
 }
@@ -37,16 +38,39 @@ interface Options {
   statePath?: string;
   current?: string;
   now?: number;
-  fetchLatest?: (signal: AbortSignal) => Promise<string | null>;
+  fetchLatest?: (signal?: AbortSignal) => Promise<string | null>;
+}
+
+async function installedVersion(): Promise<string> {
+  return JSON.parse(await readFile(PACKAGE_JSON, 'utf-8')).version as string;
+}
+
+// Resolves to the latest release, or null when GitHub can't be reached. An
+// unwritable cache still returns the answer.
+async function fetchAndCache(signal: AbortSignal | undefined, options: Options): Promise<string | null> {
+  const { statePath = STATE_PATH, now = Date.now(), fetchLatest = fetchLatestVersion } = options;
+  let latest: string | null = null;
+  try {
+    latest = await fetchLatest(signal);
+    if (latest) {
+      await mkdir(dirname(statePath), { recursive: true });
+      await writeFile(statePath, JSON.stringify({ checkedAt: now, latest }));
+    }
+  } catch { /* offline, timed out, aborted or unwritable */ }
+  return latest;
+}
+
+function updateNotice(latest: string, current: string): string {
+  return `[claude-auto-retry] Version ${latest} is available (installed: ${current}). To update, run:\n  ${INSTALL_COMMAND}`;
 }
 
 // Resolves to a notice when a newer release exists, else null. Asks GitHub at most
 // once a day and answers from the cached result in between. Never rejects: a
 // failed or aborted check falls back to the cache.
 export async function checkForUpdate(signal: AbortSignal, options: Options = {}): Promise<string | null> {
-  const { statePath = STATE_PATH, now = Date.now(), fetchLatest = fetchLatestVersion } = options;
+  const { statePath = STATE_PATH, now = Date.now() } = options;
   try {
-    const current = options.current ?? (JSON.parse(await readFile(PACKAGE_JSON, 'utf-8')).version as string);
+    const current = options.current ?? await installedVersion();
     let checkedAt = 0;
     let latest = '';
     try {
@@ -54,20 +78,19 @@ export async function checkForUpdate(signal: AbortSignal, options: Options = {})
       if (typeof state?.checkedAt === 'number' && typeof state?.latest === 'string') ({ checkedAt, latest } = state);
     } catch { /* no usable state yet */ }
 
-    if (!(now - checkedAt < CHECK_INTERVAL_MS)) {
-      try {
-        const fetched = await fetchLatest(signal);
-        if (fetched) {
-          latest = fetched;
-          await mkdir(dirname(statePath), { recursive: true });
-          await writeFile(statePath, JSON.stringify({ checkedAt: now, latest }));
-        }
-      } catch { /* offline, timed out or aborted */ }
-    }
+    if (!(now - checkedAt < CHECK_INTERVAL_MS)) latest = await fetchAndCache(signal, options) ?? latest;
 
-    if (!isNewer(latest, current)) return null;
-    return `[claude-auto-retry] Version ${latest} is available (installed: ${current}). To update, run:\n  ${INSTALL_COMMAND}`;
+    return isNewer(latest, current) ? updateNotice(latest, current) : null;
   } catch {
     return null;
   }
+}
+
+// The manual check: asks GitHub now, whatever the cache or the updateCheck setting
+// says. Resolves to the message to print, or null when GitHub can't be reached.
+export async function checkNow(options: Options = {}): Promise<string | null> {
+  const current = options.current ?? await installedVersion();
+  const latest = await fetchAndCache(undefined, options);
+  if (!latest) return null;
+  return isNewer(latest, current) ? updateNotice(latest, current) : `claude-auto-retry ${current} is up to date.`;
 }

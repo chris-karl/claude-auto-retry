@@ -47,7 +47,7 @@ To update, run the `npm i -g …` command again. To pin a version, replace
 Once a day the launcher asks GitHub for the latest release number. When a newer
 version exists, it prints one notice after your `claude` session ends. Nothing is
 installed automatically; set `"updateCheck": false` in the configuration to turn
-the check off.
+the check off. `claude-auto-retry check-update` checks right away.
 
 ## How it works
 
@@ -143,10 +143,11 @@ a Mac awake during a session.
 ## Commands
 
 ```bash
-claude-auto-retry install     # add the claude shell function
-claude-auto-retry uninstall   # remove it
-claude-auto-retry status      # last log entries
-claude-auto-retry logs        # follow today's log
+claude-auto-retry install       # add the claude shell function
+claude-auto-retry uninstall     # remove it
+claude-auto-retry status        # last log entries
+claude-auto-retry logs          # follow today's log
+claude-auto-retry check-update  # check for a newer release now
 claude-auto-retry version
 ```
 

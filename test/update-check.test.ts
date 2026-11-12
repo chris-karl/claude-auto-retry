@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkForUpdate, isNewer } from '../src/update-check.ts';
+import { checkForUpdate, checkNow, isNewer } from '../src/update-check.ts';
 
 const DAY = 24 * 3600_000;
 const T0 = 20_000 * DAY;
@@ -72,5 +72,26 @@ describe('checkForUpdate', () => {
       await writeFile(statePath, corrupt).catch(() => {});
       assert.equal(await checkForUpdate(signal, { ...opts, fetchLatest: async () => null }), null);
     }
+  }));
+});
+
+describe('checkNow', () => {
+  it('asks GitHub even within the daily interval and refreshes the cache', () => withStateFile(async (statePath) => {
+    const opts = { statePath, current: '2026.11.0' };
+    await checkForUpdate(signal, { ...opts, now: T0, fetchLatest: async () => '2026.11.0' });
+    assert.match(await checkNow({ ...opts, now: T0 + 5, fetchLatest: async () => '2026.11.1' }) ?? '', /Version 2026\.11\.1 is available/);
+    assert.deepEqual(JSON.parse(await readFile(statePath, 'utf-8')), { checkedAt: T0 + 5, latest: '2026.11.1' });
+    assert.match(await checkForUpdate(signal, { ...opts, now: T0 + 10, fetchLatest: async () => null }) ?? '', /2026\.11\.1 is available/);
+  }));
+
+  it('says so when the installed version is current', () => withStateFile(async (statePath) => {
+    assert.equal(await checkNow({ statePath, current: '2026.11.1', now: T0, fetchLatest: async () => '2026.11.1' }),
+      'claude-auto-retry 2026.11.1 is up to date.');
+  }));
+
+  it('resolves to null when GitHub cannot be reached', () => withStateFile(async (statePath) => {
+    const opts = { statePath, current: '2026.11.0', now: T0 };
+    assert.equal(await checkNow({ ...opts, fetchLatest: async () => { throw new Error('offline'); } }), null);
+    assert.equal(await checkNow({ ...opts, fetchLatest: async () => null }), null);
   }));
 });

@@ -1,6 +1,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTerminal, writeToTerminal, readScreen } from '../src/pty.ts';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  createTerminal,
+  writeToTerminal,
+  readScreen,
+  ensureSpawnHelperExecutable,
+  spawnPty,
+} from '../src/pty.ts';
 
 describe('readScreen', () => {
   it('renders written lines as plain text', async () => {
@@ -32,5 +41,34 @@ describe('readScreen', () => {
     assert.ok(rows.length <= 5);
     assert.ok(screen.includes('line-49'));
     assert.ok(!screen.includes('line-10'));
+  });
+});
+
+describe('ensureSpawnHelperExecutable', () => {
+  it('restores the exec bits on the prebuilt spawn-helper', { skip: process.platform === 'win32' }, () => {
+    const root = mkdtempSync(join(tmpdir(), 'car-pty-'));
+    try {
+      const dir = join(root, 'prebuilds', `${process.platform}-${process.arch}`);
+      mkdirSync(dir, { recursive: true });
+      const helper = join(dir, 'spawn-helper');
+      writeFileSync(helper, '');
+      chmodSync(helper, 0o644);
+      ensureSpawnHelperExecutable(root);
+      assert.equal(statSync(helper).mode & 0o777, 0o755);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// Only macOS loads node-pty's prebuilt binary without the install scripts CI skips.
+describe('spawnPty', { skip: process.platform !== 'darwin' }, () => {
+  it('runs a command through the installed node-pty', async () => {
+    const child = await spawnPty('/bin/echo', ['pty-ok']);
+    let out = '';
+    child.onData((d) => { out += d; });
+    const { exitCode } = await new Promise<{ exitCode: number }>((r) => child.onExit(r));
+    assert.equal(exitCode, 0);
+    assert.match(out, /pty-ok/);
   });
 });

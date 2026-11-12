@@ -12,9 +12,10 @@
 import type { Terminal } from '@xterm/headless';
 import type { IPty } from 'node-pty';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 // Render the headless terminal's screen buffer to plain text: the last `maxLines`
 // rows (viewport + recent scrollback), trailing whitespace trimmed per line.
@@ -65,12 +66,26 @@ interface SpawnPtyOptions {
   cwd?: string;
 }
 
+// node-pty 1.1.0 publishes its macOS prebuilt spawn-helper without the exec bit,
+// so every spawn fails with "posix_spawnp failed." until it is restored.
+// Best effort: on an install we can't write to, the spawn error stands.
+export function ensureSpawnHelperExecutable(root?: string): void {
+  if (process.platform === 'win32') return;
+  try {
+    root ??= dirname(createRequire(import.meta.url).resolve('node-pty/package.json'));
+    const helper = join(root, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper');
+    const { mode } = statSync(helper);
+    if ((mode & 0o111) !== 0o111) chmodSync(helper, mode | 0o111);
+  } catch { /* no prebuilt helper (built from source) or unwritable */ }
+}
+
 // Spawn a command inside a real PTY. Thin wrapper around node-pty.
 export async function spawnPty(
   file: string,
   args: string[],
   { cols, rows, env, cwd }: SpawnPtyOptions = {},
 ): Promise<IPty> {
+  ensureSpawnHelperExecutable();
   const { spawn } = await import('node-pty');
   return spawn(file, args, {
     // node-pty replaces TERM with `name`; pass the real one through so claude still

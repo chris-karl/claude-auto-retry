@@ -40,7 +40,7 @@ emit_release() {
 
 if [ "${MODE:-auto}" = "release" ]; then
   # An accidental double dispatch must not cut a second release.
-  released_as=$(git tag -l 'v*' --points-at HEAD)
+  released_as=$(git tag -l '[0-9]*.[0-9]*.[0-9]*' --points-at HEAD)
   if [ -n "$released_as" ]; then
     echo "::error::Commit $(git rev-parse HEAD) is already released as $released_as"
     exit 1

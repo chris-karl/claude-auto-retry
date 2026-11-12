@@ -22,7 +22,7 @@ export function isNewer(latest: string, current: string): boolean {
   return false;
 }
 
-// releases/latest redirects to releases/tag/v<version>: the Location header is
+// releases/latest redirects to releases/tag/<version>: the Location header is
 // the answer, with no API rate limit and no body to parse.
 async function fetchLatestVersion(signal: AbortSignal): Promise<string | null> {
   const res = await fetch(`${RELEASES_URL}/latest`, {
@@ -30,7 +30,7 @@ async function fetchLatestVersion(signal: AbortSignal): Promise<string | null> {
     redirect: 'manual',
     signal: AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]),
   });
-  return /\/tag\/v(\d+\.\d+\.\d+)$/.exec(res.headers.get('location') ?? '')?.[1] ?? null;
+  return /\/tag\/(\d+\.\d+\.\d+)$/.exec(res.headers.get('location') ?? '')?.[1] ?? null;
 }
 
 interface Options {

@@ -8,7 +8,7 @@
 set -eu
 
 version=$(jq -r .version package.json)
-if [ "v$version" != "$TAG" ]; then
+if [ "$version" != "$TAG" ]; then
   echo "::error::package.json version $version does not match release tag $TAG — refusing to attach a mislabeled tarball"
   exit 1
 fi

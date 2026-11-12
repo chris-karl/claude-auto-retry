@@ -3,7 +3,7 @@
 # the commit to tag as the sha output.
 set -eu
 
-version=${TAG#v}
+version=$TAG
 npm version --no-git-tag-version --allow-same-version "$version" > /dev/null
 if git diff --quiet; then
   # Already bumped (by a failed earlier run, or by hand); reuse it.
